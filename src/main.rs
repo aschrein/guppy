@@ -1,3 +1,5 @@
+//#![feature(generators, generator_trait)]
+
 struct CacheLine {
     tag: u64,
     data: [u32; 16],
@@ -12,19 +14,11 @@ struct Register {
     locked: bool,
 }
 
-struct VGPRF {
-    regs: Vec<Register>,
-}
-
-struct SGPRF {
-    regs: Vec<Register>,
-}
-
 use std::rc::Rc;
 
-struct ExecMask {
-    mask: Vec<bool>,
-}
+type ExecMask = Vec<bool>;
+type VGPRF = Vec<Register>;
+type SGPRF = Vec<Register>;
 
 struct WaveState {
     vgprfs: Vec<VGPRF>,
@@ -36,6 +30,7 @@ struct WaveState {
     // Next instruction
     pc: u32,
 
+    exec_mask: ExecMask,
     // execution mask stack
     exec_mask_stack: Vec<ExecMask>,
 
@@ -51,6 +46,7 @@ struct VALUState {
     instr: Instruction,
     wave_id: u32,
     timer: u32,
+    busy: bool,
 }
 
 struct SALUState {
@@ -150,7 +146,7 @@ struct GPUConfig {
     fd_per_cu: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Component {
     X,
     Y,
@@ -192,7 +188,7 @@ struct Sampler {
     sample_format: SampleFormat,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Interpretation {
     F32,
     I32,
@@ -201,24 +197,24 @@ enum Interpretation {
 }
 
 // r1.__xy
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RegRef {
     id: u32,
     comps: [Component; 4],
     interp: Interpretation,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BufferRef {
     id: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TextureRef {
     id: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ImmediateVal {
     V1U(u32),
     V2U(u32, u32),
@@ -234,7 +230,7 @@ enum ImmediateVal {
     V4F(f32, f32, f32, f32),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum BuiltinVal {
     // Global thread id
     THREAD_ID,
@@ -243,7 +239,7 @@ enum BuiltinVal {
     LANE_ID,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Operand {
     VRegister(RegRef),
     SRegister(RegRef),
@@ -254,7 +250,7 @@ enum Operand {
     NONE,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum InstTy {
     MOV,
     ADD,
@@ -271,11 +267,49 @@ enum InstTy {
     NONE,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Instruction {
     ty: InstTy,
     line: u32,
     ops: [Operand; 4],
+}
+
+impl Instruction {
+    fn assertTwoOp(&self) {
+        match (&self.ops[2], &self.ops[3]) {
+            (Operand::NONE, Operand::NONE) => {}
+            _ => {
+                std::panic!("");
+            }
+        }
+    }
+    fn assertThreeOp(&self) {
+        match (&self.ops[3]) {
+            Operand::NONE => {}
+            _ => {
+                std::panic!("");
+            }
+        }
+    }
+}
+
+//use std::ops::Generator;
+
+enum CmdStatus {
+    YIELD,
+    COMPLETE,
+}
+
+// Generator function for an instruction
+type InstGen = Box<Fn(&mut WaveState) -> CmdStatus>;
+
+trait ICmd {
+    fn prereq(&mut self, inst: &Instruction) -> bool;
+    fn start(&mut self) -> InstGen;
+}
+
+fn matchInst(inst: &Instruction) -> Option<InstGen> {
+    None
 }
 
 struct Program {
@@ -318,9 +352,9 @@ fn clock(gpu_state: &mut GPUState) {
             }
         }
     }
-    // @Execute cycle
+    // @Fetch-Submit part
     {
-        // For each compute unit
+        // For each compute unit(they run in parallel in our imagination)
         for cu in &mut gpu_state.cus {
             // Clear some flags
             for wave in &mut cu.waves {
@@ -331,33 +365,101 @@ fn clock(gpu_state: &mut GPUState) {
             for fe in &mut cu.fes {
                 for wave in &mut cu.waves {
                     if wave.enabled && !wave.has_been_dispatched && !wave.stalled {
-                        wave.has_been_dispatched = true;
+                        let mut dispatchOnVALU = false;
+                        let mut dispatchOnSALU = false;
+                        let mut dispatchOnSampler = false;
                         let inst = &(*wave.program).ins[wave.pc as usize];
+                        let mut has_dep = false;
+                        // Do simple decoding and sanity checks
                         match &inst.ty {
                             ADD => {
-                                match (&inst.ops[2], &inst.ops[3]) {
-                                    (Operand::NONE, Operand::NONE) => {}
-                                    _ => {
-                                        std::panic!("");
+                                inst.assertThreeOp();
+
+                                for op in &inst.ops {
+                                    match &op {
+                                        Operand::VRegister(vreg) => {
+                                            for gprf in &wave.vgprfs {
+                                                if gprf[vreg.id as usize].locked {
+                                                    has_dep = true;
+                                                }
+                                            }
+                                            dispatchOnVALU = true;
+                                        }
+                                        Operand::SRegister(sreg) => {
+                                            if wave.sgprf[sreg.id as usize].locked {
+                                                has_dep = true;
+                                            }
+
+                                            dispatchOnSALU = true;
+                                        }
+                                        Operand::Immediate(imm) => {}
+                                        _ => {
+                                            std::panic!("");
+                                        }
                                     }
-                                };
-                                match &inst.ops[0] {
-                                    Operand::VRegister(op1) => match &inst.ops[1] {
-                                        Operand::SRegister(op2) => {}
-                                        _ => std::panic!(""),
-                                    },
-                                    Operand::SRegister(op1) => match &inst.ops[1] {
-                                        Operand::SRegister(op2) => {}
-                                        _ => std::panic!(""),
-                                    },
-                                    _ => std::panic!(""),
                                 }
                             }
-                            _ => std::panic!("unsupported {:?}", inst.ops[0]),
+                            _ => {
+                                std::panic!("");
+                            }
+                        };
+                        // Make sure only one dispatch flag is set
+                        assert!(
+                            vec![dispatchOnSALU, dispatchOnSampler, dispatchOnVALU]
+                                .iter()
+                                .filter(|&a| *a == true)
+                                .collect::<Vec<&bool>>()
+                                .len()
+                                == 1
+                        );
+                        // One of the operands is being locked
+                        // Stall the wave
+                        if has_dep {
+                            wave.stalled = true;
+                            continue;
+                        }
+                        if dispatchOnVALU {
+                            for valu in &mut cu.valus {
+                                if valu.busy {
+                                    continue;
+                                }
+                                wave.has_been_dispatched = true;
+                                valu.instr = inst.clone();
+                                valu.timer = 1;
+                                valu.busy = true;
+                                valu.wave_id = wave.dispatch_id;
+                            }
+                        } else if dispatchOnSALU {
+                            std::panic!();
+                        } else if dispatchOnSampler {
+                            std::panic!();
                         }
                     }
                 }
             }
+            // @ALU
+            // Now do work on Vector ALUs
+            for valu in &mut cu.valus {
+                if !valu.busy {
+                    continue;
+                }
+                if valu.timer != 0 {
+                    valu.timer -= 1;
+                }
+                if valu.timer == 0 {
+                    let inst = &valu.instr;
+                    match &inst {
+                        ADD => match (&inst.ops[0], &inst.ops[1]) {
+                            (Operand::VRegister(op1), Operand::VRegister(op2)) => {}
+
+                            _ => std::panic!(""),
+                        },
+                        _ => std::panic!("unsupported {:?}", inst.ops[0]),
+                    }
+                }
+            }
+            // And on Scalar ALUs
+            for salu in &mut cu.salus {}
         }
     }
 }
