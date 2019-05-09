@@ -9,9 +9,24 @@ struct Cache {
     contents: Vec<CacheLine>,
 }
 
+#[derive(Clone, Copy)]
 struct Register {
     val: [u32; 4],
     locked: bool,
+}
+
+impl Register {
+    fn AddU32(&self, that: &Register) -> Register {
+        Register {
+            val: [
+                self.val[0] + that.val[0],
+                self.val[1] + that.val[1],
+                self.val[2] + that.val[2],
+                self.val[3] + that.val[3],
+            ],
+            locked: false,
+        }
+    }
 }
 
 use std::rc::Rc;
@@ -21,12 +36,13 @@ type VGPRF = Vec<Register>;
 type SGPRF = Vec<Register>;
 
 struct WaveState {
+    // Array of vector registers, vgprfs[0] means array of r0 for each laneS
     vgprfs: Vec<VGPRF>,
     sgprf: SGPRF,
     // id within the same dispatch group
     dispatch_id: u32,
     // Shared pointer to the program
-    program: Rc<Program>,
+    program: Option<Rc<Program>>,
     // Next instruction
     pc: u32,
 
@@ -42,17 +58,69 @@ struct WaveState {
     has_been_dispatched: bool,
 }
 
+impl WaveState {
+    fn new(config: &GPUConfig) -> WaveState {
+        WaveState {
+            vgprfs: Vec::new(),
+            sgprf: Vec::new(),
+            dispatch_id: 0,
+            program: None,
+            pc: 0,
+            exec_mask: Vec::new(),
+            exec_mask_stack: Vec::new(),
+            stalled: false,
+            enabled: false,
+            has_been_dispatched: false,
+        }
+    }
+    fn dispatch(&mut self, config: &GPUConfig, program: &Rc<Program>) {
+        let mut vgprfs: Vec<VGPRF> = Vec::new();
+        let mut sgprf: SGPRF = Vec::new();
+        for i in 0..config.VGPRF_per_pe {
+            let mut vpgrf: VGPRF = Vec::new();
+            for i in 0..config.wave_size {
+                vpgrf.push(Register {
+                    val: [0, 0, 0, 0],
+                    locked: false,
+                });
+            }
+            vgprfs.push(vpgrf);
+        }
+        for i in 0..config.SGPRF_per_wave {
+            sgprf.push(Register {
+                val: [0, 0, 0, 0],
+                locked: false,
+            });
+        }
+        let mut exec_mask: Vec<bool> = Vec::new();
+        for i in 0..config.wave_size {
+            exec_mask.push(true);
+        }
+        self.program = Some(program.clone());
+        self.sgprf = sgprf;
+        self.vgprfs = vgprfs;
+        self.exec_mask = exec_mask;
+        self.stalled = false;
+        self.pc = 0;
+        // @TODO: make something meaningful with the id
+        self.dispatch_id = 0;
+        self.has_been_dispatched = false;
+        self.enabled = true;
+    }
+}
+
 struct VALUState {
-    instr: Instruction,
+    instr: Option<Instruction>,
     wave_id: u32,
     timer: u32,
     busy: bool,
 }
 
 struct SALUState {
-    instr: Instruction,
+    instr: Option<Instruction>,
     wave_id: u32,
     timer: u32,
+    busy: bool,
 }
 
 struct SamplerState {}
@@ -81,6 +149,48 @@ struct CUState {
     slm: SLMState,
 }
 
+impl CUState {
+    fn new(config: &GPUConfig) -> CUState {
+        let mut waves: Vec<WaveState> = Vec::new();
+        for i in 0..config.waves_per_cu {
+            waves.push(WaveState::new(config));
+        }
+        let mut valus: Vec<VALUState> = Vec::new();
+        let mut salus: Vec<SALUState> = Vec::new();
+        for i in 0..config.ALU_per_cu {
+            valus.push(VALUState {
+                instr: None,
+                wave_id: 0,
+                timer: 0,
+                busy: false,
+            });
+        }
+        salus.push(SALUState {
+            instr: None,
+            wave_id: 0,
+            timer: 0,
+            busy: false,
+        });
+        let mut fes: Vec<FEState> = Vec::new();
+        for i in 0..config.fd_per_cu {
+            fes.push(FEState {});
+        }
+        let mut samplers: Vec<SamplerState> = Vec::new();
+        for i in 0..config.samplers_per_cu {
+            samplers.push(SamplerState {});
+        }
+        CUState {
+            waves: waves,
+            valus: valus,
+            salus: salus,
+            fes: fes,
+            samplers: samplers,
+            l1: L1State {},
+            slm: SLMState {},
+        }
+    }
+}
+
 struct GPUState {
     // ongoing work
     cus: Vec<CUState>,
@@ -88,6 +198,23 @@ struct GPUState {
     l2: L2State,
     // queue for future work
     dreqs: Vec<DispatchReq>,
+    // factory settings
+    config: GPUConfig,
+}
+
+impl GPUState {
+    fn new(config: &GPUConfig) -> GPUState {
+        let mut cus: Vec<CUState> = Vec::new();
+        for i in 0..config.CU_count {
+            cus.push(CUState::new(config));
+        }
+        GPUState {
+            cus: cus,
+            l2: L2State {},
+            dreqs: Vec::new(),
+            config: config.clone(),
+        }
+    }
 }
 
 struct ALUInstMeta {
@@ -95,6 +222,7 @@ struct ALUInstMeta {
     throughput: u32,
 }
 
+#[derive(Clone, Copy)]
 struct GPUConfig {
     // ~300 clk
     DRAM_latency: u32,
@@ -201,7 +329,7 @@ enum Interpretation {
 struct RegRef {
     id: u32,
     comps: [Component; 4],
-    interp: Interpretation,
+    //interp: Interpretation,
 }
 
 #[derive(Debug, Clone)]
@@ -318,13 +446,15 @@ struct Program {
 
 struct DispatchReq {
     program: Rc<Program>,
-    count: u32,
+    group_size: u32,
+    group_count: u32,
 }
 
-fn dispatch(gpu_state: &mut GPUState, program: Program, count: u32) {
+fn dispatch(gpu_state: &mut GPUState, program: Program, group_size: u32, group_count: u32) {
     let disp_req = DispatchReq {
         program: Rc::new(program),
-        count: count,
+        group_count: group_count,
+        group_size: group_size,
     };
     gpu_state.dreqs.push(disp_req);
 }
@@ -332,8 +462,10 @@ fn dispatch(gpu_state: &mut GPUState, program: Program, count: u32) {
 fn clock(gpu_state: &mut GPUState) {
     // @Dispatch work
     {
-        let cnt_free_waves = {
+        // @TODO: Remove
+        let mut cnt_free_waves = {
             let mut cnt = 0;
+
             for cu in &gpu_state.cus {
                 for wave in &cu.waves {
                     if !wave.enabled {
@@ -343,15 +475,46 @@ fn clock(gpu_state: &mut GPUState) {
             }
             cnt
         };
-        for i in 0..cnt_free_waves {
+        let mut deferredReq: Vec<DispatchReq> = Vec::new();
+        while cnt_free_waves > 0 {
             match gpu_state.dreqs.pop() {
                 Some(req) => {
-                    // Dispatch on this wave
+                    // Make sure it's a power of two and no greater than 1024
+                    assert!(
+                        ((req.group_size - 1) & req.group_size) == 0
+                            && req.group_size <= 1024
+                            && req.group_count * req.group_size != 0
+                    );
+                    assert!(req.group_count * req.group_size % 32 == 0);
+                    let mut warp_count = req.group_count * req.group_size / 32;
+                    if warp_count > cnt_free_waves {
+                        deferredReq.push(req);
+                        continue;
+                    }
+                    cnt_free_waves -= warp_count;
+                    // Find a free wave and dispatch on it
+                    // @TODO: make popWave method
+                    for cu in &mut gpu_state.cus {
+                        for wave in &mut cu.waves {
+                            if !wave.enabled {
+                                wave.dispatch(&gpu_state.config, &req.program);
+                                warp_count -= 1;
+                                if warp_count == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                        if warp_count == 0 {
+                            break;
+                        }
+                    }
                 }
                 None => break,
             }
         }
+        gpu_state.dreqs.append(&mut deferredReq);
     }
+
     // @Fetch-Submit part
     {
         // For each compute unit(they run in parallel in our imagination)
@@ -368,18 +531,18 @@ fn clock(gpu_state: &mut GPUState) {
                         let mut dispatchOnVALU = false;
                         let mut dispatchOnSALU = false;
                         let mut dispatchOnSampler = false;
-                        let inst = &(*wave.program).ins[wave.pc as usize];
+                        let inst = &(*wave.program.as_ref().unwrap()).ins[wave.pc as usize];
                         let mut has_dep = false;
                         // Do simple decoding and sanity checks
                         match &inst.ty {
-                            ADD => {
+                            InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
                                 inst.assertThreeOp();
 
                                 for op in &inst.ops {
                                     match &op {
                                         Operand::VRegister(vreg) => {
-                                            for gprf in &wave.vgprfs {
-                                                if gprf[vreg.id as usize].locked {
+                                            for reg in &wave.vgprfs[vreg.id as usize] {
+                                                if reg.locked {
                                                     has_dep = true;
                                                 }
                                             }
@@ -393,6 +556,7 @@ fn clock(gpu_state: &mut GPUState) {
                                             dispatchOnSALU = true;
                                         }
                                         Operand::Immediate(imm) => {}
+                                        Operand::NONE => {}
                                         _ => {
                                             std::panic!("");
                                         }
@@ -424,7 +588,8 @@ fn clock(gpu_state: &mut GPUState) {
                                     continue;
                                 }
                                 wave.has_been_dispatched = true;
-                                valu.instr = inst.clone();
+                                valu.instr = Some(inst.clone());
+                                // @TODO: determine the timer value
                                 valu.timer = 1;
                                 valu.busy = true;
                                 valu.wave_id = wave.dispatch_id;
@@ -433,6 +598,12 @@ fn clock(gpu_state: &mut GPUState) {
                             std::panic!();
                         } else if dispatchOnSampler {
                             std::panic!();
+                        }
+                        // If an instruction was issued then increment PC
+                        if wave.has_been_dispatched {
+                            wave.pc += 1;
+                        } else {
+                            // Not enough resources to dispatch a command
                         }
                     }
                 }
@@ -447,15 +618,47 @@ fn clock(gpu_state: &mut GPUState) {
                     valu.timer -= 1;
                 }
                 if valu.timer == 0 {
-                    let inst = &valu.instr;
-                    match &inst {
-                        ADD => match (&inst.ops[0], &inst.ops[1]) {
-                            (Operand::VRegister(op1), Operand::VRegister(op2)) => {}
+                    let inst = &valu.instr.as_ref().unwrap();
+                    match &inst.ty {
+                        InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
+                            let src1 = match &inst.ops[1] {
+                                Operand::VRegister(op1) => {
+                                    &cu.waves[valu.wave_id as usize].vgprfs[op1.id as usize]
+                                }
+                                // @TODO: immediate
+                                _ => std::panic!(""),
+                            };
+                            let src2 = match &inst.ops[2] {
+                                Operand::VRegister(op1) => {
+                                    &cu.waves[valu.wave_id as usize].vgprfs[op1.id as usize]
+                                }
+                                // @TODO: immediate
+                                _ => std::panic!(""),
+                            };
+                            let result = match &inst.ty {
+                                // @TODO: sub, div, mul
+                                InstTy::ADD => {
+                                    src1.iter()
+                                        .zip(src2.iter())
+                                        // @TODO: f32, s32
+                                        .map(|(&x1, &x2)| x1.AddU32(&x2))
+                                        .collect::<Vec<Register>>()
+                                }
+                                _ => std::panic!(""),
+                            };
+                            let dst = match &inst.ops[0] {
+                                Operand::VRegister(dst) => dst,
+                                _ => std::panic!(""),
+                            };
+                            assert!(
+                                cu.waves[valu.wave_id as usize].vgprfs[dst.id as usize].len()
+                                    == result.len()
+                            );
 
-                            _ => std::panic!(""),
-                        },
+                            cu.waves[valu.wave_id as usize].vgprfs[dst.id as usize] = result;
+                        }
                         _ => std::panic!("unsupported {:?}", inst.ops[0]),
-                    }
+                    };
                 }
             }
             // And on Scalar ALUs
@@ -470,4 +673,63 @@ fn parse(text: &str) -> Vec<Instruction> {
 
 fn main() {
     println!("Hello, world!");
+}
+
+#[cfg(test)]
+mod tests {
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+
+    #[test]
+    fn test1() {
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 256,
+            SGPRF_per_wave: 256,
+            wave_size: 32,
+            CU_count: 4,
+            ALU_per_cu: 4,
+            waves_per_cu: 16,
+            fd_per_cu: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let mut program = Program { ins: Vec::new() };
+        // add r0, r1, r2
+        program.ins.push(Instruction {
+            ty: InstTy::ADD,
+            line: 1,
+            ops: [
+                Operand::VRegister(RegRef {
+                    id: 0,
+                    comps: [Component::X, Component::Y, Component::Z, Component::W],
+                }),
+                Operand::VRegister(RegRef {
+                    id: 1,
+                    comps: [Component::X, Component::Y, Component::Z, Component::W],
+                }),
+                Operand::VRegister(RegRef {
+                    id: 2,
+                    comps: [Component::X, Component::Y, Component::Z, Component::W],
+                }),
+                Operand::NONE,
+            ],
+        });
+        // @Test
+        dispatch(&mut gpu_state, program, 32, 1);
+        clock(&mut gpu_state);
+    }
+    #[test]
+    fn test2() {}
 }
