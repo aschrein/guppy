@@ -9,23 +9,52 @@ struct Cache {
     contents: Vec<CacheLine>,
 }
 
-#[derive(Clone, Copy)]
+type Value = [u32; 4];
+type FValue = [f32; 4];
+
+#[derive(Clone, Copy, Debug)]
 struct Register {
-    val: [u32; 4],
+    val: Value,
     locked: bool,
 }
 
-impl Register {
-    fn AddU32(&self, that: &Register) -> Register {
-        Register {
-            val: [
-                self.val[0] + that.val[0],
-                self.val[1] + that.val[1],
-                self.val[2] + that.val[2],
-                self.val[3] + that.val[3],
-            ],
-            locked: false,
-        }
+fn AddU32(this: &Value, that: &Value) -> Value {
+    [
+        this[0] + that[0],
+        this[1] + that[1],
+        this[2] + that[2],
+        this[3] + that[3],
+    ]
+}
+
+fn AddF32(this_: &Value, that_: &Value) -> Value {
+    let this = castToFValue(this_);
+    let that = castToFValue(that_);
+    castToValue(&[
+        this[0] + that[0],
+        this[1] + that[1],
+        this[2] + that[2],
+        this[3] + that[3],
+    ])
+}
+
+fn castToValue(fval: &FValue) -> Value {
+    unsafe {
+        let ux = std::mem::transmute_copy(&fval[0]);
+        let uy = std::mem::transmute_copy(&fval[1]);
+        let uz = std::mem::transmute_copy(&fval[2]);
+        let uw = std::mem::transmute_copy(&fval[3]);
+        [ux, uy, uz, uw]
+    }
+}
+
+fn castToFValue(fval: &Value) -> FValue {
+    unsafe {
+        let ux = std::mem::transmute_copy(&fval[0]);
+        let uy = std::mem::transmute_copy(&fval[1]);
+        let uz = std::mem::transmute_copy(&fval[2]);
+        let uw = std::mem::transmute_copy(&fval[3]);
+        [ux, uy, uz, uw]
     }
 }
 
@@ -59,6 +88,16 @@ struct WaveState {
 }
 
 impl WaveState {
+    fn print(&self) {
+        println!("WaveState:{}", self.dispatch_id);
+        for vreg in &self.vgprfs {
+            println!("{:?}", vreg
+            .iter()
+            .map(|x| castToFValue(&x.val))
+            .collect::<Vec<FValue>>()
+            );
+        }
+    }
     fn new(config: &GPUConfig) -> WaveState {
         WaveState {
             vgprfs: Vec::new(),
@@ -522,67 +561,71 @@ fn clock(gpu_state: &mut GPUState) {
             // Clear some flags
             for wave in &mut cu.waves {
                 wave.has_been_dispatched = false;
-                //wave.stalled = false;
+                wave.stalled = false;
             }
             // For each fetch-exec unit
             for fe in &mut cu.fes {
-                for wave in &mut cu.waves {
+                for (wave_id, wave) in &mut cu.waves.iter_mut().enumerate() {
                     if wave.enabled && !wave.has_been_dispatched && !wave.stalled {
-                        let mut dispatchOnVALU = false;
-                        let mut dispatchOnSALU = false;
+                        let mut hasVRegOps = false;
+                        let mut hasSRegOps = false;
                         let mut dispatchOnSampler = false;
                         let inst = &(*wave.program.as_ref().unwrap()).ins[wave.pc as usize];
                         let mut has_dep = false;
                         // Do simple decoding and sanity checks
+                        for op in &inst.ops {
+                            match &op {
+                                Operand::VRegister(vreg) => {
+                                    for reg in &wave.vgprfs[vreg.id as usize] {
+                                        if reg.locked {
+                                            has_dep = true;
+                                        }
+                                    }
+                                    hasVRegOps = true;
+                                }
+                                Operand::SRegister(sreg) => {
+                                    if wave.sgprf[sreg.id as usize].locked {
+                                        has_dep = true;
+                                    }
+
+                                    hasSRegOps = true;
+                                }
+                                Operand::Immediate(imm) => {}
+                                Operand::NONE => {}
+                                _ => {
+                                    std::panic!("");
+                                }
+                            }
+                        }
                         match &inst.ty {
                             InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
                                 inst.assertThreeOp();
-
-                                for op in &inst.ops {
-                                    match &op {
-                                        Operand::VRegister(vreg) => {
-                                            for reg in &wave.vgprfs[vreg.id as usize] {
-                                                if reg.locked {
-                                                    has_dep = true;
-                                                }
-                                            }
-                                            dispatchOnVALU = true;
-                                        }
-                                        Operand::SRegister(sreg) => {
-                                            if wave.sgprf[sreg.id as usize].locked {
-                                                has_dep = true;
-                                            }
-
-                                            dispatchOnSALU = true;
-                                        }
-                                        Operand::Immediate(imm) => {}
-                                        Operand::NONE => {}
-                                        _ => {
-                                            std::panic!("");
-                                        }
-                                    }
-                                }
+                            }
+                            InstTy::MOV => {
+                                inst.assertTwoOp();
                             }
                             _ => {
                                 std::panic!("");
                             }
                         };
-                        // Make sure only one dispatch flag is set
+                        //
                         assert!(
-                            vec![dispatchOnSALU, dispatchOnSampler, dispatchOnVALU]
+                            vec![hasSRegOps, dispatchOnSampler, hasVRegOps]
                                 .iter()
                                 .filter(|&a| *a == true)
                                 .collect::<Vec<&bool>>()
                                 .len()
-                                == 1
+                                == 1 // Mixing different register types
                         );
+
                         // One of the operands is being locked
                         // Stall the wave
                         if has_dep {
                             wave.stalled = true;
                             continue;
                         }
-                        if dispatchOnVALU {
+                        // For simplicity dispatch commands basing only on registers used
+                        if hasVRegOps {
                             for valu in &mut cu.valus {
                                 if valu.busy {
                                     continue;
@@ -592,9 +635,33 @@ fn clock(gpu_state: &mut GPUState) {
                                 // @TODO: determine the timer value
                                 valu.timer = 1;
                                 valu.busy = true;
-                                valu.wave_id = wave.dispatch_id;
+                                valu.wave_id = wave_id as u32;
+                                // Lock the destination registers
+                                match &inst.ty {
+                                    InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
+                                        if let Operand::VRegister(dst) = &inst.ops[0] {
+                                            for item in &mut wave.vgprfs[dst.id as usize] {
+                                                item.locked = true;
+                                            }
+                                        } else {
+                                            std::panic!("")
+                                        }
+                                    }
+                                    InstTy::MOV => {
+                                        if let Operand::VRegister(dst) = &inst.ops[0] {
+                                            for item in &mut wave.vgprfs[dst.id as usize] {
+                                                item.locked = true;
+                                            }
+                                        } else {
+                                            std::panic!("")
+                                        }
+                                    }
+                                    _ => std::panic!(""),
+                                }
+                                // Successfully dispatched
+                                break;
                             }
-                        } else if dispatchOnSALU {
+                        } else if hasSRegOps {
                             std::panic!();
                         } else if dispatchOnSampler {
                             std::panic!();
@@ -602,6 +669,10 @@ fn clock(gpu_state: &mut GPUState) {
                         // If an instruction was issued then increment PC
                         if wave.has_been_dispatched {
                             wave.pc += 1;
+                            if wave.pc as usize == wave.program.as_ref().unwrap().ins.len() {
+                                wave.enabled = false;
+                                // Wave has been retired
+                            }
                         } else {
                             // Not enough resources to dispatch a command
                         }
@@ -619,29 +690,41 @@ fn clock(gpu_state: &mut GPUState) {
                 }
                 if valu.timer == 0 {
                     let inst = &valu.instr.as_ref().unwrap();
+                    let mut wave = &mut cu.waves[valu.wave_id as usize];
+                    let getVal = |wave: &WaveState, op: &Operand| -> Vec<Value> {
+                        match &op {
+                            Operand::VRegister(vop) => wave.vgprfs[vop.id as usize]
+                                .iter()
+                                .map(|r| r.val)
+                                .collect::<Vec<Value>>(),
+                            Operand::Immediate(imm) => match imm {
+                                ImmediateVal::V4F(x, y, z, w) => {
+                                    let mut values: Vec<Value> = Vec::new();
+                                    for i in 0..wave.vgprfs[0].len() {
+                                        values.push(castToValue(&[*x, *y, *z, *w]));
+                                    }
+                                    values
+                                }
+                                _ => std::panic!(""),
+                            },
+                            // @TODO: immediate
+                            _ => std::panic!(""),
+                        }
+                    };
                     match &inst.ty {
                         InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
-                            let src1 = match &inst.ops[1] {
-                                Operand::VRegister(op1) => {
-                                    &cu.waves[valu.wave_id as usize].vgprfs[op1.id as usize]
-                                }
-                                // @TODO: immediate
-                                _ => std::panic!(""),
-                            };
-                            let src2 = match &inst.ops[2] {
-                                Operand::VRegister(op1) => {
-                                    &cu.waves[valu.wave_id as usize].vgprfs[op1.id as usize]
-                                }
-                                // @TODO: immediate
-                                _ => std::panic!(""),
-                            };
+                            let src1 = getVal(wave, &inst.ops[1]);
+                            let src2 = getVal(wave, &inst.ops[2]);
                             let result = match &inst.ty {
                                 // @TODO: sub, div, mul
                                 InstTy::ADD => {
                                     src1.iter()
                                         .zip(src2.iter())
-                                        // @TODO: f32, s32
-                                        .map(|(&x1, &x2)| x1.AddU32(&x2))
+                                        // @TODO: Support different types
+                                        .map(|(&x1, &x2)| Register {
+                                            val: AddF32(&x1, &x2),
+                                            locked: false,
+                                        })
                                         .collect::<Vec<Register>>()
                                 }
                                 _ => std::panic!(""),
@@ -650,15 +733,32 @@ fn clock(gpu_state: &mut GPUState) {
                                 Operand::VRegister(dst) => dst,
                                 _ => std::panic!(""),
                             };
-                            assert!(
-                                cu.waves[valu.wave_id as usize].vgprfs[dst.id as usize].len()
-                                    == result.len()
-                            );
+                            assert!(wave.vgprfs[dst.id as usize].len() == result.len());
+                            // Registers should be unlocked by this time
+                            wave.vgprfs[dst.id as usize] = result;
+                        }
+                        InstTy::MOV => {
+                            let src1 = getVal(wave, &inst.ops[1]);
+                            let result = src1
+                                .iter()
+                                .map(|(&x1)| Register {
+                                    val: x1,
+                                    locked: false,
+                                })
+                                .collect::<Vec<Register>>();
 
-                            cu.waves[valu.wave_id as usize].vgprfs[dst.id as usize] = result;
+                            let dst = match &inst.ops[0] {
+                                Operand::VRegister(dst) => dst,
+                                _ => std::panic!(""),
+                            };
+                            assert!(wave.vgprfs[dst.id as usize].len() == result.len());
+                            // Registers should be unlocked by this time
+                            wave.vgprfs[dst.id as usize] = result;
                         }
                         _ => std::panic!("unsupported {:?}", inst.ops[0]),
                     };
+                    wave.print();
+                    valu.busy = false;
                 }
             }
             // And on Scalar ALUs
@@ -696,9 +796,9 @@ mod tests {
             SLM_size: 1 << 14,
             SLM_latency: 20,
             SLM_banks: 32,
-            VGPRF_per_pe: 256,
-            SGPRF_per_wave: 256,
-            wave_size: 32,
+            VGPRF_per_pe: 16,
+            SGPRF_per_wave: 16,
+            wave_size: 1,
             CU_count: 4,
             ALU_per_cu: 4,
             waves_per_cu: 16,
@@ -706,10 +806,38 @@ mod tests {
         };
         let mut gpu_state = GPUState::new(&config);
         let mut program = Program { ins: Vec::new() };
-        // add r0, r1, r2
+        // 1: mov r1.xyzw, vec4(1.0f, 1.0f, 1.0f, 0.0f)
+        // 2: mov r2.xyzw, vec4(1.0f, 2.0f, 3.0f, 4.0f)
+        // 3: add r0.xyzw, r1.xyzw, r2.xyzw
+        program.ins.push(Instruction {
+            ty: InstTy::MOV,
+            line: 1,
+            ops: [
+                Operand::VRegister(RegRef {
+                    id: 1,
+                    comps: [Component::X, Component::Y, Component::Z, Component::W],
+                }),
+                Operand::Immediate(ImmediateVal::V4F(1.0, 1.0, 1.0, 0.0)),
+                Operand::NONE,
+                Operand::NONE,
+            ],
+        });
+        program.ins.push(Instruction {
+            ty: InstTy::MOV,
+            line: 2,
+            ops: [
+                Operand::VRegister(RegRef {
+                    id: 2,
+                    comps: [Component::X, Component::Y, Component::Z, Component::W],
+                }),
+                Operand::Immediate(ImmediateVal::V4F(1.0, 2.0, 3.0, 4.0)),
+                Operand::NONE,
+                Operand::NONE,
+            ],
+        });
         program.ins.push(Instruction {
             ty: InstTy::ADD,
-            line: 1,
+            line: 3,
             ops: [
                 Operand::VRegister(RegRef {
                     id: 0,
@@ -728,6 +856,8 @@ mod tests {
         });
         // @Test
         dispatch(&mut gpu_state, program, 32, 1);
+        clock(&mut gpu_state);
+        clock(&mut gpu_state);
         clock(&mut gpu_state);
     }
     #[test]
