@@ -18,6 +18,33 @@ struct Register {
     locked: bool,
 }
 
+fn applyReadSwizzle(val: &Value, regref: &RegRef) -> Value {
+    let mut out: Value = [0, 0, 0, 0];
+    for i in 0..4 {
+        match regref.comps[i] {
+            Component::X => out[i] = val[0],
+            Component::Y => out[i] = val[1],
+            Component::Z => out[i] = val[2],
+            Component::W => out[i] = val[3],
+            Component::NONE => {}
+        }
+    }
+    out
+}
+fn applyWriteSwizzle(out: &mut Value, val: &Value, regref: &RegRef) {
+    let mut out_: Value = *out;
+    for i in 0..4 {
+        match regref.comps[i] {
+            Component::X => out_[0] = val[i],
+            Component::Y => out_[1] = val[i],
+            Component::Z => out_[2] = val[i],
+            Component::W => out_[3] = val[i],
+            Component::NONE => {}
+        }
+    }
+    *out = out_;
+}
+
 fn AddU32(this: &Value, that: &Value) -> Value {
     [
         this[0] + that[0],
@@ -71,6 +98,17 @@ fn DivF32(this_: &Value, that_: &Value) -> Value {
     ])
 }
 
+fn LTF32(this_: &Value, that_: &Value) -> Value {
+    let this = castToFValue(this_);
+    let that = castToFValue(that_);
+    [
+        if this[0] < that[0] { 1 } else { 0 },
+        if this[1] < that[1] { 1 } else { 0 },
+        if this[2] < that[2] { 1 } else { 0 },
+        if this[3] < that[3] { 1 } else { 0 },
+    ]
+}
+
 fn castToValue(fval: &FValue) -> Value {
     unsafe {
         let ux = std::mem::transmute_copy(&fval[0]);
@@ -117,7 +155,7 @@ struct WaveState {
 
     exec_mask: ExecMask,
     // execution mask stack
-    exec_mask_stack: Vec<ExecMask>,
+    exec_mask_stack: Vec<(ExecMask, u32)>,
 
     // if this wave has been stalled on the previous cycle
     stalled: bool,
@@ -133,6 +171,8 @@ impl WaveState {
             "WaveState wave_id::{}, group_id::{}",
             self.wave_id, self.group_id
         );
+        println!("exec_mask::{:?}", self.exec_mask);
+
         for vreg in &self.vgprfs {
             println!(
                 "{:?}",
@@ -156,6 +196,134 @@ impl WaveState {
             stalled: false,
             enabled: false,
             has_been_dispatched: false,
+        }
+    }
+    fn getValues(&self, op: &Operand) -> Vec<Value> {
+        let wave_width = self.vgprfs[0].len();
+        match &op {
+            Operand::VRegister(vop) => self.vgprfs[vop.id as usize]
+                .iter()
+                .map(|r| applyReadSwizzle(&r.val, &vop))
+                .collect::<Vec<Value>>(),
+            Operand::Immediate(imm) => match imm {
+                ImmediateVal::V4F(x, y, z, w) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, *y, *z, *w]));
+                    }
+                    values
+                }
+                ImmediateVal::V3F(x, y, z) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, *y, *z, 0.0]));
+                    }
+                    values
+                }
+                ImmediateVal::V2F(x, y) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, *y, 0.0, 0.0]));
+                    }
+                    values
+                }
+                ImmediateVal::V1F(x) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, 0.0, 0.0, 0.0]));
+                    }
+                    values
+                }
+                ImmediateVal::V4F(x, y, z, w) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, *y, *z, *w]));
+                    }
+                    values
+                }
+                ImmediateVal::V3F(x, y, z) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, *y, *z, 0.0]));
+                    }
+                    values
+                }
+                ImmediateVal::V2F(x, y) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, *y, 0.0, 0.0]));
+                    }
+                    values
+                }
+                ImmediateVal::V1F(x) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push(castToValue(&[*x, 0.0, 0.0, 0.0]));
+                    }
+                    values
+                }
+                ImmediateVal::V4U(x, y, z, w) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push([*x, *y, *z, *w]);
+                    }
+                    values
+                }
+                ImmediateVal::V3U(x, y, z) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push([*x, *y, *z, 0]);
+                    }
+                    values
+                }
+                ImmediateVal::V2U(x, y) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push([*x, *y, 0, 0]);
+                    }
+                    values
+                }
+                ImmediateVal::V1U(x) => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push([*x, 0, 0, 0]);
+                    }
+                    values
+                }
+                _ => std::panic!(""),
+            },
+            Operand::Builtin(imm) => match imm {
+                BuiltinVal::THREAD_ID => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        let id = self.group_id * self.group_size
+                            + self.wave_id * wave_width as u32
+                            + i as u32;
+                        values.push([id, id, id, id]);
+                    }
+                    values
+                }
+                BuiltinVal::LANE_ID => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        let id = i as u32;
+                        values.push([id, id, id, id]);
+                    }
+                    values
+                }
+                BuiltinVal::WAVE_ID => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        let id = self.wave_id;
+                        values.push([id, id, id, id]);
+                    }
+                    values
+                }
+
+                _ => std::panic!(""),
+            },
+            // @TODO: immediate
+            _ => std::panic!(""),
         }
     }
     fn dispatch(
@@ -478,6 +646,7 @@ enum Operand {
     Texture(TextureRef),
     Immediate(ImmediateVal),
     Builtin(BuiltinVal),
+    Label(u32),
     NONE,
 }
 
@@ -496,6 +665,10 @@ enum InstTy {
     SAMPLE,
     DISCARD,
     UTOF,
+    LT,
+    BR,
+    POP,
+    RET,
     NONE,
 }
 
@@ -638,6 +811,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                         let mut hasVRegOps = false;
                         let mut hasSRegOps = false;
                         let mut dispatchOnSampler = false;
+                        let mut branchingOp = false;
                         let inst = &(*wave.program.as_ref().unwrap()).ins[wave.pc as usize];
                         let mut has_dep = false;
                         // Do simple decoding and sanity checks
@@ -662,6 +836,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 }
                                 Operand::Immediate(imm) => {}
                                 Operand::Builtin(buiiltin) => {}
+                                Operand::Label(label) => {}
                                 Operand::NONE => {}
                                 _ => {
                                     std::panic!("");
@@ -669,9 +844,10 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             }
                         }
                         match &inst.ty {
-                            InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
+                            InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
                                 inst.assertThreeOp();
                             }
+                            InstTy::BR | InstTy::POP | InstTy::RET => {branchingOp = true;}
                             InstTy::MOV | InstTy::UTOF => {
                                 inst.assertTwoOp();
                             }
@@ -679,15 +855,16 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 std::panic!("");
                             }
                         };
-                        //
-                        assert!(
-                            vec![hasSRegOps, dispatchOnSampler, hasVRegOps]
-                                .iter()
-                                .filter(|&a| *a == true)
-                                .collect::<Vec<&bool>>()
-                                .len()
-                                == 1 // Mixing different register types
-                        );
+                        // @TODO: Make proper sanity checks
+                        // assert!(
+                        //     vec![hasSRegOps, dispatchOnSampler, hasVRegOps]
+                        //         .iter()
+                        //         .filter(|&a| *a == true)
+                        //         .collect::<Vec<&bool>>()
+                        //         .len()
+                        //         == 1 // Mixing different register types
+                        //         || branchingOp
+                        // );
 
                         // One of the operands is being locked
                         // Stall the wave
@@ -695,8 +872,60 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             wave.stalled = true;
                             continue;
                         }
+
+                        if let InstTy::RET = inst.ty {
+                            wave.enabled = false;
+                        }
+                        else if let InstTy::POP = inst.ty {
+                            assert!(wave.exec_mask_stack.len() != 0);
+                            let prev_mask = wave.exec_mask_stack.pop().unwrap();
+                            wave.exec_mask = prev_mask.0;
+                            wave.pc = prev_mask.1;
+                            wave.has_been_dispatched = true;
+                        }
+                        else if let InstTy::BR = inst.ty {
+                            match &inst.ops[0] {
+                                Operand::VRegister(vreg) => {
+                                    match &vreg.comps {
+                                        [x, Component::NONE, Component::NONE, Component::NONE] => {
+
+                                        }
+                                        _ => std::panic!("The first parameter should be one component e.g. r1.x, not r1.xy")
+                                    }
+                                    let values = wave.getValues(&inst.ops[0]);
+                                    let true_mask = values
+                                        .iter()
+                                        .map(|i| i[0] != 0)
+                                        .zip(&wave.exec_mask)
+                                        .map(|(a, b): (bool, &bool)| a && *b)
+                                        .collect::<Vec<_>>();
+                                    let false_mask = true_mask
+                                        .iter()
+                                        .map(|i| !i)
+                                        .zip(&wave.exec_mask)
+                                        .map(|(a, b): (bool, &bool)| a && *b)
+                                        .collect::<Vec<_>>();
+                                    let (true_addr, false_addr, converge_addr) =
+                                        match (&inst.ops[1], &inst.ops[2], &inst.ops[3]) {
+                                            (
+                                                Operand::Label(ta),
+                                                Operand::Label(fa),
+                                                Operand::Label(ca),
+                                            ) => (*ta, *fa, *ca),
+                                            _ => std::panic!(""),
+                                        };
+                                    wave.exec_mask_stack
+                                        .push((wave.exec_mask.clone(), converge_addr));
+                                    wave.exec_mask_stack.push((false_mask, false_addr));
+                                    wave.exec_mask = true_mask;
+                                    wave.pc = true_addr;
+                                    wave.has_been_dispatched = true;
+                                }
+                                _ => std::panic!("Unsupported branch parameter"),
+                            }
+                        }
                         // For simplicity dispatch commands basing only on registers used
-                        if hasVRegOps {
+                        else if hasVRegOps {
                             for valu in &mut cu.valus {
                                 if valu.busy {
                                     continue;
@@ -709,7 +938,11 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 valu.wave_id = wave_id as u32;
                                 // Lock the destination registers
                                 match &inst.ty {
-                                    InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
+                                    InstTy::ADD
+                                    | InstTy::SUB
+                                    | InstTy::MUL
+                                    | InstTy::DIV
+                                    | InstTy::LT => {
                                         if let Operand::VRegister(dst) = &inst.ops[0] {
                                             for (i, item) in
                                                 wave.vgprfs[dst.id as usize].iter_mut().enumerate()
@@ -740,20 +973,20 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 // Successfully dispatched
                                 break;
                             }
+                            // If an instruction was issued then increment PC
+                            if wave.has_been_dispatched {
+                                wave.pc += 1;
+                                if wave.pc as usize == wave.program.as_ref().unwrap().ins.len() {
+                                    wave.enabled = false;
+                                    // Wave has been retired
+                                }
+                            } else {
+                                // Not enough resources to dispatch a command
+                            }
                         } else if hasSRegOps {
                             std::panic!();
                         } else if dispatchOnSampler {
                             std::panic!();
-                        }
-                        // If an instruction was issued then increment PC
-                        if wave.has_been_dispatched {
-                            wave.pc += 1;
-                            if wave.pc as usize == wave.program.as_ref().unwrap().ins.len() {
-                                wave.enabled = false;
-                                // Wave has been retired
-                            }
-                        } else {
-                            // Not enough resources to dispatch a command
                         }
                     }
                 }
@@ -771,186 +1004,32 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                 if valu.timer == 0 {
                     let inst = &valu.instr.as_ref().unwrap();
                     let mut wave = &mut cu.waves[valu.wave_id as usize];
-                    let applyReadSwizzle = |val: &Value, regref: &RegRef| -> Value {
-                        let mut out: Value = [0, 0, 0, 0];
-                        for i in 0..4 {
-                            match regref.comps[i] {
-                                Component::X => out[i] = val[0],
-                                Component::Y => out[i] = val[1],
-                                Component::Z => out[i] = val[2],
-                                Component::W => out[i] = val[3],
-                                Component::NONE => {}
-                            }
-                        }
-                        out
-                    };
-                    let applyWriteSwizzle = |out: &mut Value, val: &Value, regref: &RegRef| {
-                        let mut out_: Value = *out;
-                        for i in 0..4 {
-                            match regref.comps[i] {
-                                Component::X => out_[0] = val[i],
-                                Component::Y => out_[1] = val[i],
-                                Component::Z => out_[2] = val[i],
-                                Component::W => out_[3] = val[i],
-                                Component::NONE => {}
-                            }
-                        }
-                        *out = out_;
-                    };
 
-                    let getVal = |wave: &WaveState, op: &Operand| -> Vec<Value> {
-                        let wave_width = wave.vgprfs[0].len();
-                        match &op {
-                            Operand::VRegister(vop) => wave.vgprfs[vop.id as usize]
-                                .iter()
-                                .map(|r| applyReadSwizzle(&r.val, &vop))
-                                .collect::<Vec<Value>>(),
-                            Operand::Immediate(imm) => match imm {
-                                ImmediateVal::V4F(x, y, z, w) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, *y, *z, *w]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V3F(x, y, z) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, *y, *z, 0.0]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V2F(x, y) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, *y, 0.0, 0.0]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V1F(x) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, 0.0, 0.0, 0.0]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V4F(x, y, z, w) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, *y, *z, *w]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V3F(x, y, z) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, *y, *z, 0.0]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V2F(x, y) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, *y, 0.0, 0.0]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V1F(x) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push(castToValue(&[*x, 0.0, 0.0, 0.0]));
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V4U(x, y, z, w) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push([*x, *y, *z, *w]);
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V3U(x, y, z) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push([*x, *y, *z, 0]);
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V2U(x, y) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push([*x, *y, 0, 0]);
-                                    }
-                                    values
-                                }
-                                ImmediateVal::V1U(x) => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        values.push([*x, 0, 0, 0]);
-                                    }
-                                    values
-                                }
-                                _ => std::panic!(""),
-                            },
-                            Operand::Builtin(imm) => match imm {
-                                BuiltinVal::THREAD_ID => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        let id = wave.group_id * wave.group_size + wave.wave_id * wave_width as u32 + i as u32;
-                                        values.push([id, id, id, id]);
-                                    }
-                                    values
-                                }
-                                BuiltinVal::LANE_ID => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        let id = i as u32;
-                                        values.push([id, id, id, id]);
-                                    }
-                                    values
-                                }
-                                BuiltinVal::WAVE_ID => {
-                                    let mut values: Vec<Value> = Vec::new();
-                                    for i in 0..wave_width {
-                                        let id = wave.wave_id;
-                                        values.push([id, id, id, id]);
-                                    }
-                                    values
-                                }
-
-                                _ => std::panic!(""),
-                            },
-                            // @TODO: immediate
-                            _ => std::panic!(""),
-                        }
-                    };
                     match &inst.ty {
-                        InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV => {
-                            let src1 = getVal(wave, &inst.ops[1]);
-                            let src2 = getVal(wave, &inst.ops[2]);
+                        InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
+                            let src1 = wave.getValues(&inst.ops[1]);
+                            let src2 = wave.getValues(&inst.ops[2]);
                             let dst = match &inst.ops[0] {
                                 Operand::VRegister(dst) => dst,
                                 _ => std::panic!(""),
                             };
-                            let result = match &inst.ty {
+                            let result = {
                                 // @TODO: sub, div, mul
-                                InstTy::ADD => {
-                                    src1.iter()
-                                        .zip(src2.iter())
-                                        // @TODO: Support different types
-                                        .map(|(&x1, &x2)| match inst.interp {
-                                            Interpretation::F32 => match inst.ty {
-                                                InstTy::ADD => AddF32(&x1, &x2),
-                                                InstTy::SUB => SubF32(&x1, &x2),
-                                                InstTy::MUL => MulF32(&x1, &x2),
-                                                InstTy::DIV => DivF32(&x1, &x2),
-                                                _ => std::panic!(""),
-                                            },
+                                src1.iter()
+                                    .zip(src2.iter())
+                                    // @TODO: Support different types
+                                    .map(|(&x1, &x2)| match inst.interp {
+                                        Interpretation::F32 => match inst.ty {
+                                            InstTy::ADD => AddF32(&x1, &x2),
+                                            InstTy::SUB => SubF32(&x1, &x2),
+                                            InstTy::MUL => MulF32(&x1, &x2),
+                                            InstTy::DIV => DivF32(&x1, &x2),
+                                            InstTy::LT => LTF32(&x1, &x2),
                                             _ => std::panic!(""),
-                                        })
-                                        .collect::<Vec<Value>>()
-                                }
-                                _ => std::panic!(""),
+                                        },
+                                        _ => std::panic!(""),
+                                    })
+                                    .collect::<Vec<Value>>()
                             };
                             assert!(wave.vgprfs[dst.id as usize].len() == result.len());
                             // Registers should be unlocked by this time
@@ -964,7 +1043,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             }
                         }
                         InstTy::MOV | InstTy::UTOF => {
-                            let src1 = getVal(wave, &inst.ops[1]);
+                            let src1 = wave.getValues(&inst.ops[1]);
                             let dst = match &inst.ops[0] {
                                 Operand::VRegister(dst) => dst,
                                 _ => std::panic!(""),
@@ -1041,7 +1120,7 @@ mod tests {
         // 2: mov r2.wzyx, vec4(1.0f, 2.0f, 3.0f, 4.0f)
         // 3: add_f32 r0.xyzw, r1.xyzw, r2.xyzw
         // 4: mov r1.w, thread_id
-        // 5: utof r1.w, r1.w
+        // 5: utof r1.xyzw, r1.wwww
         // 6: add_f32 r3.xyzw, r1.xyzw, r2.xyzw
         // 7: mov r4.w, vec1(777.0f)
         program.ins.push(Instruction {
@@ -1093,12 +1172,12 @@ mod tests {
             ],
         });
         program.ins.push(Instruction {
-            interp: Interpretation::U32,
+            interp: Interpretation::NONE,
             ty: InstTy::MOV,
             line: 4,
             ops: [
                 Operand::VRegister(RegRef {
-                    id: 4,
+                    id: 1,
                     comps: [
                         Component::W,
                         Component::NONE,
@@ -1117,11 +1196,11 @@ mod tests {
             line: 5,
             ops: [
                 Operand::VRegister(RegRef {
-                    id: 4,
+                    id: 1,
                     comps: [Component::X, Component::Y, Component::Z, Component::W],
                 }),
                 Operand::VRegister(RegRef {
-                    id: 4,
+                    id: 1,
                     comps: [Component::W, Component::W, Component::W, Component::W],
                 }),
                 Operand::NONE,
@@ -1148,7 +1227,6 @@ mod tests {
                 Operand::NONE,
             ],
         });
-
         program.ins.push(Instruction {
             interp: Interpretation::F32,
             ty: InstTy::MOV,
@@ -1168,8 +1246,122 @@ mod tests {
                 Operand::NONE,
             ],
         });
+
+        // 8: lt_f32 r1.x, r1.y, vec1(2.0f)
+        // 9: br r1.x, LB_0, LB_1, LB_3
+        //10: LB_0:
+        //11: mov r1.x, vec1(1.0f)
+        //12: pop
+        //13: LB_1:
+        //14: mov r1.x, vec1(0.0f)
+        //15: pop
+        //16: LB_3:
+        //17: ret
+        program.ins.push(Instruction {
+            interp: Interpretation::F32,
+            ty: InstTy::LT,
+            line: 8,
+            ops: [
+                Operand::VRegister(RegRef {
+                    id: 1,
+                    comps: [
+                        Component::X,
+                        Component::NONE,
+                        Component::NONE,
+                        Component::NONE,
+                    ],
+                }),
+                Operand::VRegister(RegRef {
+                    id: 1,
+                    comps: [
+                        Component::Y,
+                        Component::NONE,
+                        Component::NONE,
+                        Component::NONE,
+                    ],
+                }),
+                Operand::Immediate(ImmediateVal::V1F(2.0)),
+                Operand::NONE,
+            ],
+        });
+        program.ins.push(Instruction {
+            interp: Interpretation::F32,
+            ty: InstTy::BR,
+            line: 9,
+            ops: [
+                Operand::VRegister(RegRef {
+                    id: 1,
+                    comps: [
+                        Component::X,
+                        Component::NONE,
+                        Component::NONE,
+                        Component::NONE,
+                    ],
+                }),
+                Operand::Label(9),
+                Operand::Label(11),
+                Operand::Label(13),
+            ],
+        });
+        program.ins.push(Instruction {
+            interp: Interpretation::F32,
+            ty: InstTy::MOV,
+            line: 11,
+            ops: [
+                Operand::VRegister(RegRef {
+                    id: 1,
+                    comps: [
+                        Component::X,
+                        Component::NONE,
+                        Component::NONE,
+                        Component::NONE,
+                    ],
+                }),
+                Operand::Immediate(ImmediateVal::V1F(666.0)),
+                Operand::NONE,
+                Operand::NONE,
+            ],
+        });
+        program.ins.push(Instruction {
+            interp: Interpretation::NONE,
+            ty: InstTy::POP,
+            line: 12,
+            ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE],
+        });
+        program.ins.push(Instruction {
+            interp: Interpretation::F32,
+            ty: InstTy::MOV,
+            line: 14,
+            ops: [
+                Operand::VRegister(RegRef {
+                    id: 1,
+                    comps: [
+                        Component::X,
+                        Component::NONE,
+                        Component::NONE,
+                        Component::NONE,
+                    ],
+                }),
+                Operand::Immediate(ImmediateVal::V1F(777.0)),
+                Operand::NONE,
+                Operand::NONE,
+            ],
+        });
+        program.ins.push(Instruction {
+            interp: Interpretation::NONE,
+            ty: InstTy::POP,
+            line: 15,
+            ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE],
+        });
+        program.ins.push(Instruction {
+            interp: Interpretation::NONE,
+            ty: InstTy::RET,
+            line: 17,
+            ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE],
+        });
+
         // @Test
-        dispatch(&mut gpu_state, program, 2, 2);
+        dispatch(&mut gpu_state, program, 4, 1);
         while clock(&mut gpu_state) {}
     }
     #[test]
