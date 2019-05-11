@@ -372,6 +372,7 @@ impl WaveState {
 
 struct VALUState {
     instr: Option<Instruction>,
+    exec_mask: Option<Vec<bool>>,
     wave_id: u32,
     timer: u32,
     busy: bool,
@@ -424,6 +425,7 @@ impl CUState {
                 wave_id: 0,
                 timer: 0,
                 busy: false,
+                exec_mask: None
             });
         }
         salus.push(SALUState {
@@ -455,7 +457,7 @@ impl CUState {
 struct GPUState {
     // ongoing work
     cus: Vec<CUState>,
-    //
+    clock_counter: u32,
     l2: L2State,
     // queue for future work
     dreqs: Vec<DispatchReq>,
@@ -474,6 +476,7 @@ impl GPUState {
             l2: L2State {},
             dreqs: Vec::new(),
             config: config.clone(),
+            clock_counter: 0,
         }
     }
     fn findFreeWave(&self) -> Option<(usize, usize)> {
@@ -795,6 +798,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
     }
     let mut didSomeWork = false;
     // @Fetch-Submit part
+    // @TODO: Refactor the loop - it looks ugly
     {
         // For each compute unit(they run in parallel in our imagination)
         for cu in &mut gpu_state.cus {
@@ -807,12 +811,28 @@ fn clock(gpu_state: &mut GPUState) -> bool {
             for fe in &mut cu.fes {
                 for (wave_id, wave) in &mut cu.waves.iter_mut().enumerate() {
                     if wave.enabled && !wave.has_been_dispatched && !wave.stalled {
+                        // At least we have some wave that must be doing something
                         didSomeWork = true;
+                        // This wave might be stalled because of instruction dependencies
+                        // or it might be waiting for the last instruction before retiring
+
+                        // @DEAD
+                        // if wave.pc >= wave.program.as_ref().unwrap().ins.len() as u32 {
+                        //     let has_locks = wave.vgprfs.iter().any(|x| x.iter().any(|y| y.locked));
+                        //     if has_locks {
+                        //         wave.stalled = true;
+                        //         continue;
+                        //     }
+                        //     // Retire if no register locks
+                        //     wave.enabled = false;
+                        // }
+                        
+                        let inst = &(*wave.program.as_ref().unwrap()).ins[wave.pc as usize];
                         let mut hasVRegOps = false;
                         let mut hasSRegOps = false;
                         let mut dispatchOnSampler = false;
                         let mut branchingOp = false;
-                        let inst = &(*wave.program.as_ref().unwrap()).ins[wave.pc as usize];
+
                         let mut has_dep = false;
                         // Do simple decoding and sanity checks
                         for op in &inst.ops {
@@ -858,6 +878,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             }
                         };
                         // @TODO: Make proper sanity checks
+
+                        // @DEAD
                         // assert!(
                         //     vec![hasSRegOps, dispatchOnSampler, hasVRegOps]
                         //         .iter()
@@ -874,9 +896,16 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             wave.stalled = true;
                             continue;
                         }
-
+                        let has_locks = wave.vgprfs.iter().any(|x| x.iter().any(|y| y.locked));
                         if let InstTy::RET = inst.ty {
+                            // If the wave has locks then stall on the return statement
+                            // Don't increment the pc - we will hit the same instruction next cycle
+                            if has_locks {
+                                wave.stalled = true;
+                                continue;
+                            }
                             wave.enabled = false;
+                            continue;
                         } else if let InstTy::POP = inst.ty {
                             assert!(wave.exec_mask_stack.len() != 0);
                             let prev_mask = wave.exec_mask_stack.pop().unwrap();
@@ -933,9 +962,10 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 wave.has_been_dispatched = true;
                                 valu.instr = Some(inst.clone());
                                 // @TODO: determine the timer value
-                                valu.timer = 1;
+                                valu.timer = 4;
                                 valu.busy = true;
                                 valu.wave_id = wave_id as u32;
+                                valu.exec_mask = Some(wave.exec_mask.clone());
                                 // Lock the destination registers
                                 match &inst.ty {
                                     InstTy::ADD
@@ -977,6 +1007,12 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             if wave.has_been_dispatched {
                                 wave.pc += 1;
                                 if wave.pc as usize == wave.program.as_ref().unwrap().ins.len() {
+                                    // If the wave has locks then stall on the return statement
+                                    if has_locks {
+                                        wave.stalled = true;
+                                        continue;
+                                    }
+
                                     wave.enabled = false;
                                     // Wave has been retired
                                 }
@@ -1004,7 +1040,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                 if valu.timer == 0 {
                     let inst = &valu.instr.as_ref().unwrap();
                     let mut wave = &mut cu.waves[valu.wave_id as usize];
-
+                    let exec_mask = &valu.exec_mask.as_ref().unwrap();
                     match &inst.ty {
                         InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
                             let src1 = wave.getValues(&inst.ops[1]);
@@ -1036,7 +1072,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             for (i, item) in
                                 &mut wave.vgprfs[dst.id as usize].iter_mut().enumerate()
                             {
-                                if wave.exec_mask[i as usize] {
+                                if exec_mask[i as usize] {
                                     applyWriteSwizzle(&mut item.val, &result[i], &dst);
                                     item.locked = false;
                                 }
@@ -1053,7 +1089,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             for (i, item) in
                                 &mut wave.vgprfs[dst.id as usize].iter_mut().enumerate()
                             {
-                                if wave.exec_mask[i as usize] {
+                                if exec_mask[i as usize] {
                                     let src = match &inst.ty {
                                         InstTy::MOV => src1[i],
                                         InstTy::UTOF => U2F(&src1[i]),
@@ -1074,6 +1110,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
             for salu in &mut cu.salus {}
         }
     }
+    gpu_state.clock_counter += 1;
     didSomeWork
 }
 
@@ -1302,10 +1339,62 @@ fn main() {
     println!("Hello, world!");
 }
 
+enum Event {
+    GROUP_DISPATCHED((u32, Vec<(u32, u32)>)),
+    WAVE_STALLED((u32, u32)),
+    WAVE_RETIRED((u32, u32)),
+    GROUP_RETIRED(u32),
+}
+
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
+
+    #[test]
+    fn test4() {
+        let res = parse(
+            r"
+                mov r0.x, vec1(1.0)
+                mov r1.x, vec1(2.0)
+                div_f32 r2.x, r0.x, r1.x
+                ret
+                ",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 4,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 16,
+            fd_per_cu: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let program = Program { ins: res };
+        dispatch(&mut gpu_state, program, 8, 1);
+        while clock(&mut gpu_state) {}
+        println!(
+            "{:?}",
+            gpu_state.cus[0].waves[0].vgprfs[2]
+                .iter()
+                .map(|r| castToFValue(&r.val))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn test3() {
