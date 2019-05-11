@@ -1066,7 +1066,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                         }
                         _ => std::panic!("unsupported {:?}", inst.ops[0]),
                     };
-                    wave.print();
+                    // wave.print();
                     valu.busy = false;
                 }
             }
@@ -1088,6 +1088,10 @@ fn parse(text: &str) -> Vec<Instruction> {
         static ref VRegRE: Regex = Regex::new(r"r([0-9]+)\.([xyzw]+)").unwrap();
         static ref V4FRE: Regex =
             Regex::new(r"vec4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V2FRE: Regex = Regex::new(r"vec2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V3FRE: Regex =
+            Regex::new(r"vec3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V1FRE: Regex = Regex::new(r"vec1[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
         static ref spaceRE: Regex = Regex::new(r"[ ]+").unwrap();
         static ref garbageRE: Regex = Regex::new(r"^[ ]+|[ ]+$|[\t]+").unwrap();
         static ref labelRE: Regex = Regex::new(r"^[ ]*([^ ]+)[ ]*:[ ]*").unwrap();
@@ -1134,6 +1138,25 @@ fn parse(text: &str) -> Vec<Instruction> {
                     x.get(4).unwrap().as_str().parse::<f32>().unwrap(),
                 )
             });
+        } else if let Some(x) = V3FRE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V3F(
+                    x.get(1).unwrap().as_str().parse::<f32>().unwrap(),
+                    x.get(2).unwrap().as_str().parse::<f32>().unwrap(),
+                    x.get(4).unwrap().as_str().parse::<f32>().unwrap(),
+                )
+            });
+        } else if let Some(x) = V2FRE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V2F(
+                    x.get(1).unwrap().as_str().parse::<f32>().unwrap(),
+                    x.get(2).unwrap().as_str().parse::<f32>().unwrap(),
+                )
+            });
+        } else if let Some(x) = V1FRE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V1F(x.get(1).unwrap().as_str().parse::<f32>().unwrap())
+            });
         } else if s == "thread_id" {
             return Operand::Builtin(BuiltinVal::THREAD_ID);
         } else if s == "lane_id" {
@@ -1142,7 +1165,7 @@ fn parse(text: &str) -> Vec<Instruction> {
             return Operand::Builtin(BuiltinVal::WAVE_ID);
         }
 
-        std::panic!("")
+        std::panic!(format!("unrecognized {:?}", s))
     };
     let lines = text.split("\n").enumerate().collect::<Vec<(usize, &str)>>();
     let mut instructions: Vec<(usize, String)> = Vec::new();
@@ -1283,6 +1306,90 @@ fn main() {
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
+
+    #[test]
+    fn test3() {
+        let res = parse(
+            r"
+                mov r4.w, thread_id
+                utof r4.xyzw, r4.wwww
+                mov r4.z, wave_id
+                utof r4.z, r4.z
+                add_f32 r4.xyzw, r4.xyzw, vec4(1.0 1.0 0.0 1.0)
+                lt_f32 r4.xy, r4.ww, vec2(3.0 2.0)
+                utof r4.xy, r4.xy
+                br r4.x, LB_0, LB_1, LB_2
+                LB_0:
+                mov r0.x, vec1(666.0)
+                br r4.y, LB_0_0, LB_0_1, LB_0_2
+                LB_0_0:
+                mov r0.y, vec1(666.0)
+                pop
+                LB_0_1:
+                mov r0.y, vec1(777.0)
+                pop
+                LB_0_2:
+                pop
+                LB_1:
+                mov r0.x, vec1(777.0)
+                pop
+                LB_2:
+                mov r4.y, lane_id
+                utof r4.y, r4.y
+                ret
+                ",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 4,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 16,
+            fd_per_cu: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let program = Program { ins: res };
+        dispatch(&mut gpu_state, program, 8, 1);
+        while clock(&mut gpu_state) {}
+        assert_eq!(
+            vec![
+                [666.0, 666.0, 0.0, 0.0],
+                [666.0, 777.0, 0.0, 0.0],
+                [777.0, 0.0, 0.0, 0.0],
+                [777.0, 0.0, 0.0, 0.0]
+            ],
+            gpu_state.cus[0].waves[0].vgprfs[0]
+                .iter()
+                .map(|r| castToFValue(&r.val))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![
+                [0.0, 0.0, 1.0, 5.0],
+                [0.0, 1.0, 1.0, 6.0],
+                [0.0, 2.0, 1.0, 7.0],
+                [0.0, 3.0, 1.0, 8.0]
+            ],
+            gpu_state.cus[0].waves[1].vgprfs[4]
+                .iter()
+                .map(|r| castToFValue(&r.val))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn test2() {
@@ -1446,15 +1553,30 @@ mod tests {
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 1,
-                            comps: [Component::X, Component::NONE,Component:: NONE,Component:: NONE]
+                            comps: [
+                                Component::X,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::VRegister(RegRef {
                             id: 2,
-                            comps: [Component::X, Component::NONE,Component:: NONE,Component:: NONE]
+                            comps: [
+                                Component::X,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::VRegister(RegRef {
                             id: 3,
-                            comps: [Component::Y, Component::NONE,Component:: NONE,Component:: NONE]
+                            comps: [
+                                Component::Y,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::NONE
                     ]
@@ -1466,7 +1588,12 @@ mod tests {
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
-                            comps: [Component::W, Component::NONE, Component::NONE, Component::NONE]
+                            comps: [
+                                Component::W,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::Builtin(BuiltinVal::THREAD_ID),
                         Operand::NONE,
@@ -1480,7 +1607,12 @@ mod tests {
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
-                            comps: [Component::W,Component:: NONE, Component::NONE,Component:: NONE]
+                            comps: [
+                                Component::W,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::Builtin(BuiltinVal::LANE_ID),
                         Operand::NONE,
@@ -1494,7 +1626,12 @@ mod tests {
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
-                            comps: [Component::W, Component::NONE, Component::NONE,Component:: NONE]
+                            comps: [
+                                Component::W,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::Builtin(BuiltinVal::WAVE_ID),
                         Operand::NONE,
@@ -1508,11 +1645,21 @@ mod tests {
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
-                            comps: [Component::W, Component::NONE, Component::NONE,Component:: NONE]
+                            comps: [
+                                Component::W,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::VRegister(RegRef {
                             id: 4,
-                            comps: [Component::W, Component::NONE, Component::NONE,Component:: NONE]
+                            comps: [
+                                Component::W,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
                         }),
                         Operand::NONE,
                         Operand::NONE
