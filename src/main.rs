@@ -545,7 +545,7 @@ struct GPUConfig {
     fd_per_cu: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Component {
     X,
     Y,
@@ -587,7 +587,7 @@ struct Sampler {
     sample_format: SampleFormat,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Interpretation {
     F32,
     I32,
@@ -596,24 +596,24 @@ enum Interpretation {
 }
 
 // r1.__xy
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct RegRef {
     id: u32,
     comps: [Component; 4],
     //interp: Interpretation,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct BufferRef {
     id: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct TextureRef {
     id: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum ImmediateVal {
     V1U(u32),
     V2U(u32, u32),
@@ -629,7 +629,7 @@ enum ImmediateVal {
     V4F(f32, f32, f32, f32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum BuiltinVal {
     // Global thread id
     THREAD_ID,
@@ -638,7 +638,7 @@ enum BuiltinVal {
     LANE_ID,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Operand {
     VRegister(RegRef),
     SRegister(RegRef),
@@ -650,7 +650,7 @@ enum Operand {
     NONE,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum InstTy {
     MOV,
     ADD,
@@ -672,7 +672,7 @@ enum InstTy {
     NONE,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Instruction {
     ty: InstTy,
     interp: Interpretation,
@@ -847,7 +847,9 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
                                 inst.assertThreeOp();
                             }
-                            InstTy::BR | InstTy::POP | InstTy::RET => {branchingOp = true;}
+                            InstTy::BR | InstTy::POP | InstTy::RET => {
+                                branchingOp = true;
+                            }
                             InstTy::MOV | InstTy::UTOF => {
                                 inst.assertTwoOp();
                             }
@@ -875,15 +877,13 @@ fn clock(gpu_state: &mut GPUState) -> bool {
 
                         if let InstTy::RET = inst.ty {
                             wave.enabled = false;
-                        }
-                        else if let InstTy::POP = inst.ty {
+                        } else if let InstTy::POP = inst.ty {
                             assert!(wave.exec_mask_stack.len() != 0);
                             let prev_mask = wave.exec_mask_stack.pop().unwrap();
                             wave.exec_mask = prev_mask.0;
                             wave.pc = prev_mask.1;
                             wave.has_been_dispatched = true;
-                        }
-                        else if let InstTy::BR = inst.ty {
+                        } else if let InstTy::BR = inst.ty {
                             match &inst.ops[0] {
                                 Operand::VRegister(vreg) => {
                                     match &vreg.comps {
@@ -1077,8 +1077,202 @@ fn clock(gpu_state: &mut GPUState) -> bool {
     didSomeWork
 }
 
+#[macro_use]
+extern crate lazy_static;
+extern crate regex;
+use regex::Regex;
+
 fn parse(text: &str) -> Vec<Instruction> {
-    vec![]
+    let mut out: Vec<Instruction> = Vec::new();
+    lazy_static! {
+        static ref VRegRE: Regex = Regex::new(r"r([0-9]+)\.([xyzw]+)").unwrap();
+        static ref V4FRE: Regex =
+            Regex::new(r"vec4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref spaceRE: Regex = Regex::new(r"[ ]+").unwrap();
+        static ref garbageRE: Regex = Regex::new(r"^[ ]+|[ ]+$|[\t]+").unwrap();
+        static ref labelRE: Regex = Regex::new(r"^[ ]*([^ ]+)[ ]*:[ ]*").unwrap();
+    }
+    let mapSwizzle = |c: char| -> Component {
+        match c {
+            'x' => Component::X,
+            'y' => Component::Y,
+            'z' => Component::Z,
+            'w' => Component::W,
+            _ => std::panic!(""),
+        }
+    };
+    let parseOperand = |s: &str| -> Operand {
+        if let Some(x) = VRegRE.captures(s) {
+            return Operand::VRegister({
+                let regnum = x.get(1).unwrap().as_str();
+                let mut swizzle = x
+                    .get(2)
+                    .unwrap()
+                    .as_str()
+                    .chars()
+                    .map(|c| mapSwizzle(c))
+                    .collect::<Vec<_>>();
+                while swizzle.len() < 4 {
+                    swizzle.push(Component::NONE);
+                }
+                RegRef {
+                    id: regnum.parse::<u32>().unwrap(),
+                    comps: [
+                        swizzle[0].clone(),
+                        swizzle[1].clone(),
+                        swizzle[2].clone(),
+                        swizzle[3].clone(),
+                    ],
+                }
+            });
+        } else if let Some(x) = V4FRE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V4F(
+                    x.get(1).unwrap().as_str().parse::<f32>().unwrap(),
+                    x.get(2).unwrap().as_str().parse::<f32>().unwrap(),
+                    x.get(3).unwrap().as_str().parse::<f32>().unwrap(),
+                    x.get(4).unwrap().as_str().parse::<f32>().unwrap(),
+                )
+            });
+        } else if s == "thread_id" {
+            return Operand::Builtin(BuiltinVal::THREAD_ID);
+        } else if s == "lane_id" {
+            return Operand::Builtin(BuiltinVal::LANE_ID);
+        } else if s == "wave_id" {
+            return Operand::Builtin(BuiltinVal::WAVE_ID);
+        }
+
+        std::panic!("")
+    };
+    let lines = text.split("\n").enumerate().collect::<Vec<(usize, &str)>>();
+    let mut instructions: Vec<(usize, String)> = Vec::new();
+    use std::collections::HashMap;
+    let mut label_map: HashMap<String, usize> = HashMap::new();
+    for (line_num, line) in lines {
+        let normalized = garbageRE.replace_all(line.clone(), " ");
+        if let Some(s) = labelRE.captures(&normalized) {
+            // Label points to the next line
+            label_map.insert(String::from(s.get(1).unwrap().as_str()), line_num + 1);
+        } else {
+            instructions.push((line_num, String::from(normalized)));
+        }
+    }
+    for (line_num, line) in instructions {
+        // take first after split(" ")
+        let parts = spaceRE
+            .replace_all(&line, " ")
+            .split(" ")
+            .map(|s| String::from(s))
+            .filter(|s| s != "")
+            .next();
+        //.collect::<Vec<String>>();
+        if parts.is_none() {
+            continue;
+        }
+        let command = parts.unwrap();
+        let operands = &line[command.len() + 1..]
+            .split(",")
+            .map(|s| String::from(garbageRE.replace_all(s, "")))
+            .filter(|s| s != "")
+            .collect::<Vec<String>>();
+        // println!("{:?}", operands);
+        let instr = match command.as_str() {
+            "mov" | "utof" => {
+                assert!(operands.len() == 2);
+                let dstRef = parseOperand(&operands[0]);
+                let srcRef = parseOperand(&operands[1]);
+                Instruction {
+                    ty: match command.as_str() {
+                        "mov" => InstTy::MOV,
+                        "utof" => InstTy::UTOF,
+                        _ => std::panic!(""),
+                    },
+                    interp: Interpretation::NONE,
+                    line: line_num as u32,
+                    ops: [dstRef, srcRef, Operand::NONE, Operand::NONE],
+                }
+            }
+            "pop" | "ret" => {
+                assert!(operands.len() == 0);
+                Instruction {
+                    ty: match command.as_str() {
+                        "pop" => InstTy::POP,
+                        "ret" => InstTy::RET,
+                        _ => std::panic!(""),
+                    },
+                    interp: Interpretation::NONE,
+                    line: line_num as u32,
+                    ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE],
+                }
+            }
+
+            "add_f32" | "sub_f32" | "mul_f32" | "div_f32" | "lt_f32" => {
+                assert!(operands.len() == 3);
+                let dstRef = parseOperand(&operands[0]);
+                let src1Ref = parseOperand(&operands[1]);
+                let src2Ref = parseOperand(&operands[2]);
+                Instruction {
+                    ty: match command.as_str() {
+                        "add_f32" => InstTy::ADD,
+                        "sub_f32" => InstTy::SUB,
+                        "mul_f32" => InstTy::MUL,
+                        "div_f32" => InstTy::DIV,
+                        "lt_f32" => InstTy::LT,
+                        _ => std::panic!(""),
+                    },
+                    interp: Interpretation::F32,
+                    line: line_num as u32,
+                    ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
+                }
+            }
+            "br" => {
+                assert!(operands.len() == 4);
+                let dstRef = parseOperand(&operands[0]);
+                let then_label = label_map.get(&operands[1]).unwrap();
+                let else_label = label_map.get(&operands[2]).unwrap();
+                let converge_label = label_map.get(&operands[3]).unwrap();
+                Instruction {
+                    ty: InstTy::BR,
+                    interp: Interpretation::NONE,
+                    line: line_num as u32,
+                    ops: [
+                        dstRef,
+                        Operand::Label(*then_label as u32),
+                        Operand::Label(*else_label as u32),
+                        Operand::Label(*converge_label as u32),
+                    ],
+                }
+            }
+
+            _ => std::panic!("unrecognized command"),
+        };
+        out.push(instr);
+    }
+    // Resolve labels to instruction indices
+    let mut line_map: HashMap<u32, u32> = HashMap::new();
+    for (i, inst) in out.iter().enumerate() {
+        line_map.insert(inst.line, i as u32);
+    }
+    for inst in &mut out {
+        if InstTy::BR == inst.ty {
+            let new_indices = match (&inst.ops[1], &inst.ops[2], &inst.ops[3]) {
+                (
+                    Operand::Label(then_label),
+                    Operand::Label(else_label),
+                    Operand::Label(converge_label),
+                ) => (
+                    *line_map.get(then_label).unwrap(),
+                    *line_map.get(else_label).unwrap(),
+                    *line_map.get(converge_label).unwrap(),
+                ),
+                _ => panic!(""),
+            };
+            inst.ops[1] = Operand::Label(new_indices.0);
+            inst.ops[2] = Operand::Label(new_indices.1);
+            inst.ops[3] = Operand::Label(new_indices.2);
+        }
+    }
+    out
 }
 
 fn main() {
@@ -1089,6 +1283,244 @@ fn main() {
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
+
+    #[test]
+    fn test2() {
+        let res = parse(
+            r"
+                mov r1.xyzw, r2.xyzw
+                mov r2.x, r3.w
+                add_f32 r1.xyzw, r2.xyzw, r3.wzxy
+                mov r4.xyzw, vec4 ( 1.0 2.0 3.0 5.0 )
+                pop
+                ret
+                LB_1:
+                br r1.x, LB_1, LB_2, LB_3
+                LB_2:
+                pop
+                LB_3:
+                pop
+                ret
+                lt_f32 r1.x, r2.x, r3.y
+                mov r4.w, thread_id
+                mov r4.w, lane_id
+                mov r4.w, wave_id
+                utof r4.w, r4.w
+                ",
+        );
+        // println!("{:?}", res);
+        assert_eq!(
+            res,
+            vec![
+                Instruction {
+                    ty: InstTy::MOV,
+                    interp: Interpretation::NONE,
+                    line: 1,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 1,
+                            comps: [Component::X, Component::Y, Component::Z, Component::W]
+                        }),
+                        Operand::VRegister(RegRef {
+                            id: 2,
+                            comps: [Component::X, Component::Y, Component::Z, Component::W]
+                        }),
+                        Operand::NONE,
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::MOV,
+                    interp: Interpretation::NONE,
+                    line: 2,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 2,
+                            comps: [
+                                Component::X,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
+                        }),
+                        Operand::VRegister(RegRef {
+                            id: 3,
+                            comps: [
+                                Component::W,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
+                        }),
+                        Operand::NONE,
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::ADD,
+                    interp: Interpretation::F32,
+                    line: 3,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 1,
+                            comps: [Component::X, Component::Y, Component::Z, Component::W]
+                        }),
+                        Operand::VRegister(RegRef {
+                            id: 2,
+                            comps: [Component::X, Component::Y, Component::Z, Component::W]
+                        }),
+                        Operand::VRegister(RegRef {
+                            id: 3,
+                            comps: [Component::W, Component::Z, Component::X, Component::Y]
+                        }),
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::MOV,
+                    interp: Interpretation::NONE,
+                    line: 4,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 4,
+                            comps: [Component::X, Component::Y, Component::Z, Component::W]
+                        }),
+                        Operand::Immediate(ImmediateVal::V4F(1.0, 2.0, 3.0, 5.0)),
+                        Operand::NONE,
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::POP,
+                    interp: Interpretation::NONE,
+                    line: 5,
+                    ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE,]
+                },
+                Instruction {
+                    ty: InstTy::RET,
+                    interp: Interpretation::NONE,
+                    line: 6,
+                    ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE,]
+                },
+                Instruction {
+                    ty: InstTy::BR,
+                    interp: Interpretation::NONE,
+                    line: 8,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 1,
+                            comps: [
+                                Component::X,
+                                Component::NONE,
+                                Component::NONE,
+                                Component::NONE
+                            ]
+                        }),
+                        Operand::Label(6),
+                        Operand::Label(7),
+                        Operand::Label(8)
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::POP,
+                    interp: Interpretation::NONE,
+                    line: 10,
+                    ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
+                },
+                Instruction {
+                    ty: InstTy::POP,
+                    interp: Interpretation::NONE,
+                    line: 12,
+                    ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
+                },
+                Instruction {
+                    ty: InstTy::RET,
+                    interp: Interpretation::NONE,
+                    line: 13,
+                    ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
+                },
+                Instruction {
+                    ty: InstTy::LT,
+                    interp: Interpretation::F32,
+                    line: 14,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 1,
+                            comps: [Component::X, Component::NONE,Component:: NONE,Component:: NONE]
+                        }),
+                        Operand::VRegister(RegRef {
+                            id: 2,
+                            comps: [Component::X, Component::NONE,Component:: NONE,Component:: NONE]
+                        }),
+                        Operand::VRegister(RegRef {
+                            id: 3,
+                            comps: [Component::Y, Component::NONE,Component:: NONE,Component:: NONE]
+                        }),
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::MOV,
+                    interp: Interpretation::NONE,
+                    line: 15,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 4,
+                            comps: [Component::W, Component::NONE, Component::NONE, Component::NONE]
+                        }),
+                        Operand::Builtin(BuiltinVal::THREAD_ID),
+                        Operand::NONE,
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::MOV,
+                    interp: Interpretation::NONE,
+                    line: 16,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 4,
+                            comps: [Component::W,Component:: NONE, Component::NONE,Component:: NONE]
+                        }),
+                        Operand::Builtin(BuiltinVal::LANE_ID),
+                        Operand::NONE,
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::MOV,
+                    interp: Interpretation::NONE,
+                    line: 17,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 4,
+                            comps: [Component::W, Component::NONE, Component::NONE,Component:: NONE]
+                        }),
+                        Operand::Builtin(BuiltinVal::WAVE_ID),
+                        Operand::NONE,
+                        Operand::NONE
+                    ]
+                },
+                Instruction {
+                    ty: InstTy::UTOF,
+                    interp: Interpretation::NONE,
+                    line: 18,
+                    ops: [
+                        Operand::VRegister(RegRef {
+                            id: 4,
+                            comps: [Component::W, Component::NONE, Component::NONE,Component:: NONE]
+                        }),
+                        Operand::VRegister(RegRef {
+                            id: 4,
+                            comps: [Component::W, Component::NONE, Component::NONE,Component:: NONE]
+                        }),
+                        Operand::NONE,
+                        Operand::NONE
+                    ]
+                }
+            ]
+        );
+    }
 
     #[test]
     fn test1() {
@@ -1364,6 +1796,4 @@ mod tests {
         dispatch(&mut gpu_state, program, 4, 1);
         while clock(&mut gpu_state) {}
     }
-    #[test]
-    fn test2() {}
 }
