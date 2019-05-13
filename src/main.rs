@@ -152,8 +152,10 @@ struct WaveState {
     program: Option<Rc<Program>>,
     // Next instruction
     pc: u32,
-
+    // Determines temporarly disabled lanes
     exec_mask: ExecMask,
+    // Determines dead lanes
+    live_mask: ExecMask,
     // execution mask stack
     exec_mask_stack: Vec<(ExecMask, u32)>,
 
@@ -192,6 +194,7 @@ impl WaveState {
             program: None,
             pc: 0,
             exec_mask: Vec::new(),
+            live_mask: Vec::new(),
             exec_mask_stack: Vec::new(),
             stalled: false,
             enabled: false,
@@ -671,8 +674,11 @@ enum InstTy {
     DISCARD,
     UTOF,
     LT,
-    BR,
-    POP,
+    BR_PUSH,
+    PUSH_MASK,
+    POP_MASK,
+    MASK_NZ,
+    JMP,
     RET,
     NONE,
 }
@@ -837,7 +843,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                         let mut hasVRegOps = false;
                         let mut hasSRegOps = false;
                         let mut dispatchOnSampler = false;
-                        let mut branchingOp = false;
+                        let mut control_flow_cmd = false;
 
                         let mut has_dep = false;
                         // Do simple decoding and sanity checks
@@ -873,8 +879,13 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
                                 inst.assertThreeOp();
                             }
-                            InstTy::BR | InstTy::POP | InstTy::RET => {
-                                branchingOp = true;
+                            InstTy::BR_PUSH
+                            | InstTy::POP_MASK
+                            | InstTy::RET
+                            | InstTy::PUSH_MASK
+                            | InstTy::JMP
+                            | InstTy::MASK_NZ => {
+                                control_flow_cmd = true;
                             }
                             InstTy::MOV | InstTy::UTOF => {
                                 inst.assertTwoOp();
@@ -912,13 +923,29 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             }
                             wave.enabled = false;
                             continue;
-                        } else if let InstTy::POP = inst.ty {
+                        } else if let InstTy::POP_MASK = inst.ty {
                             assert!(wave.exec_mask_stack.len() != 0);
                             let prev_mask = wave.exec_mask_stack.pop().unwrap();
                             wave.exec_mask = prev_mask.0;
                             wave.pc = prev_mask.1;
                             wave.has_been_dispatched = true;
-                        } else if let InstTy::BR = inst.ty {
+                        } else if let InstTy::PUSH_MASK = inst.ty {
+                            let converge_addr = match &inst.ops[0] {
+                                Operand::Label(ca) => *ca,
+                                _ => std::panic!(""),
+                            };
+                            wave.exec_mask_stack
+                                .push((wave.exec_mask.clone(), converge_addr));
+                            wave.pc += 1;
+                            wave.has_been_dispatched = true;
+                        } else if let InstTy::JMP = inst.ty {
+                            let converge_addr = match &inst.ops[0] {
+                                Operand::Label(ca) => *ca,
+                                _ => std::panic!(""),
+                            };
+                            wave.pc = converge_addr;
+                            wave.has_been_dispatched = true;
+                        } else if let InstTy::BR_PUSH = inst.ty {
                             match &inst.ops[0] {
                                 Operand::VRegister(vreg) => {
                                     match &vreg.comps {
@@ -940,23 +967,50 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                         .zip(&wave.exec_mask)
                                         .map(|(a, b): (bool, &bool)| a && *b)
                                         .collect::<Vec<_>>();
-                                    let (true_addr, false_addr, converge_addr) =
-                                        match (&inst.ops[1], &inst.ops[2], &inst.ops[3]) {
-                                            (
-                                                Operand::Label(ta),
-                                                Operand::Label(fa),
-                                                Operand::Label(ca),
-                                            ) => (*ta, *fa, *ca),
+                                    let (false_addr, converge_addr) =
+                                        match (&inst.ops[1], &inst.ops[2]) {
+                                            (Operand::Label(fa), Operand::Label(ca)) => (*fa, *ca),
                                             _ => std::panic!(""),
                                         };
                                     wave.exec_mask_stack
                                         .push((wave.exec_mask.clone(), converge_addr));
                                     wave.exec_mask_stack.push((false_mask, false_addr));
                                     wave.exec_mask = true_mask;
-                                    wave.pc = true_addr;
+                                    wave.pc += 1;
                                     wave.has_been_dispatched = true;
                                 }
                                 _ => std::panic!("Unsupported branch parameter"),
+                            }
+                        } else if let InstTy::MASK_NZ = inst.ty {
+                            match &inst.ops[0] {
+                                Operand::VRegister(vreg) => {
+                                    match &vreg.comps {
+                                        [x, Component::NONE, Component::NONE, Component::NONE] => {
+
+                                        }
+                                        _ => std::panic!("The first parameter should be one component e.g. r1.x, not r1.xy")
+                                    }
+                                    let values = wave.getValues(&inst.ops[0]);
+                                    let true_mask = values
+                                        .iter()
+                                        .map(|i| i[0] != 0)
+                                        .zip(&wave.exec_mask)
+                                        .map(|(a, b): (bool, &bool)| a && *b)
+                                        .collect::<Vec<_>>();
+                                    let nz_cnt =
+                                        true_mask.iter().filter(|&x| *x).collect::<Vec<_>>().len();
+                                    if nz_cnt == 0 {
+                                        assert!(wave.exec_mask_stack.len() != 0);
+                                        let prev_mask = wave.exec_mask_stack.pop().unwrap();
+                                        wave.exec_mask = prev_mask.0;
+                                        wave.pc = prev_mask.1;
+                                    } else {
+                                        wave.exec_mask = true_mask;
+                                        wave.pc += 1;
+                                    }
+                                    wave.has_been_dispatched = true;
+                                }
+                                _ => std::panic!("Unsupported parameter"),
                             }
                         }
                         // For simplicity dispatch commands basing only on registers used
@@ -1260,11 +1314,24 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, srcRef, Operand::NONE, Operand::NONE],
                 }
             }
-            "pop" | "ret" => {
+            "mask_nz" => {
+                assert!(operands.len() == 1);
+                let dstRef = parseOperand(&operands[0]);
+                Instruction {
+                    ty: match command.as_str() {
+                        "mask_nz" => InstTy::MASK_NZ,
+                        _ => std::panic!(""),
+                    },
+                    interp: Interpretation::NONE,
+                    line: line_num as u32,
+                    ops: [dstRef, Operand::NONE, Operand::NONE, Operand::NONE],
+                }
+            }
+            "pop_mask" | "ret" => {
                 assert!(operands.len() == 0);
                 Instruction {
                     ty: match command.as_str() {
-                        "pop" => InstTy::POP,
+                        "pop_mask" => InstTy::POP_MASK,
                         "ret" => InstTy::RET,
                         _ => std::panic!(""),
                     },
@@ -1293,21 +1360,40 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
                 }
             }
-            "br" => {
-                assert!(operands.len() == 4);
-                let dstRef = parseOperand(&operands[0]);
-                let then_label = label_map.get(&operands[1]).unwrap();
-                let else_label = label_map.get(&operands[2]).unwrap();
-                let converge_label = label_map.get(&operands[3]).unwrap();
+            "jmp" | "push_mask" => {
+                assert!(operands.len() == 1);
+                let label = label_map.get(&operands[0]).unwrap();
                 Instruction {
-                    ty: InstTy::BR,
+                    ty: match command.as_str() {
+                        "jmp" => InstTy::JMP,
+                        "push_mask" => InstTy::PUSH_MASK,
+                        _ => std::panic!(""),
+                    },
+                    interp: Interpretation::NONE,
+                    line: line_num as u32,
+                    ops: [
+                        Operand::Label(*label as u32),
+                        Operand::NONE,
+                        Operand::NONE,
+                        Operand::NONE,
+                    ],
+                }
+            }
+
+            "br_push" => {
+                assert!(operands.len() == 3);
+                let dstRef = parseOperand(&operands[0]);
+                let else_label = label_map.get(&operands[1]).unwrap();
+                let converge_label = label_map.get(&operands[2]).unwrap();
+                Instruction {
+                    ty: InstTy::BR_PUSH,
                     interp: Interpretation::NONE,
                     line: line_num as u32,
                     ops: [
                         dstRef,
-                        Operand::Label(*then_label as u32),
                         Operand::Label(*else_label as u32),
                         Operand::Label(*converge_label as u32),
+                        Operand::NONE,
                     ],
                 }
             }
@@ -1322,14 +1408,9 @@ fn parse(text: &str) -> Vec<Instruction> {
         line_map.insert(inst.line, i as u32);
     }
     for inst in &mut out {
-        if InstTy::BR == inst.ty {
-            let new_indices = match (&inst.ops[1], &inst.ops[2], &inst.ops[3]) {
-                (
-                    Operand::Label(then_label),
-                    Operand::Label(else_label),
-                    Operand::Label(converge_label),
-                ) => (
-                    *line_map.get(then_label).unwrap(),
+        if InstTy::BR_PUSH == inst.ty {
+            let new_indices = match (&inst.ops[1], &inst.ops[2]) {
+                (Operand::Label(else_label), Operand::Label(converge_label)) => (
                     *line_map.get(else_label).unwrap(),
                     *line_map.get(converge_label).unwrap(),
                 ),
@@ -1337,7 +1418,13 @@ fn parse(text: &str) -> Vec<Instruction> {
             };
             inst.ops[1] = Operand::Label(new_indices.0);
             inst.ops[2] = Operand::Label(new_indices.1);
-            inst.ops[3] = Operand::Label(new_indices.2);
+        }
+        if InstTy::JMP == inst.ty || InstTy::PUSH_MASK == inst.ty {
+            let new_indices = match &inst.ops[0] {
+                Operand::Label(label) => (*line_map.get(label).unwrap(),),
+                _ => panic!(""),
+            };
+            inst.ops[0] = Operand::Label(new_indices.0);
         }
     }
     out
@@ -1372,7 +1459,91 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test4() {
+    fn exec_mask_test() {
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 32,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 4,
+            fd_per_cu: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let program = Program {
+            ins: parse(
+                r"
+                mov r4.w, lane_id
+                utof r4.xyzw, r4.wwww
+                mov r4.z, wave_id
+                utof r4.z, r4.z
+                add_f32 r4.xyzw, r4.xyzw, vec4(1.0 1.0 0.0 1.0)
+                lt_f32 r4.xy, r4.ww, vec2(16.0 8.0)
+                utof r4.xy, r4.xy
+                br_push r4.x, LB_1, LB_2
+                mov r0.x, vec1(666.0)
+                br_push r4.y, LB_0_1, LB_0_2
+                mov r0.y, vec1(666.0)
+                pop_mask
+            LB_0_1:
+                mov r0.y, vec1(777.0)
+                pop_mask
+            LB_0_2:
+                pop_mask
+            LB_1:
+                mov r0.x, vec1(777.0)
+
+                push_mask LOOP_END
+            LOOP_PROLOG:
+                lt_f32 r4.x, r4.w, vec1(32.0)
+                add_f32 r4.w, r4.w, vec1(1.0)
+                mask_nz r4.x
+            LOOP_BEGIN:
+                jmp LOOP_PROLOG
+            LOOP_END:
+                pop_mask
+                
+                
+            LB_2:
+                mov r4.y, lane_id
+                utof r4.y, r4.y
+                ret
+                ",
+            ),
+        };
+        dispatch(&mut gpu_state, &program, 64, 1);
+        while clock(&mut gpu_state) {
+            for cu in &gpu_state.cus {
+                for wave in &cu.waves {
+                    if wave.enabled {
+                        print!("{}:\t", wave.pc);
+                        for bit in &wave.exec_mask {
+                            print!("{}", if *bit { 1 } else { 0 });
+                        }
+                        print!(" ");
+                    }
+                }
+                print!(" ");
+            }
+            println!("");
+        }
+    }
+
+    #[test]
+    fn alu_overlap_cycles_test() {
         let config = GPUConfig {
             DRAM_latency: 300,
             DRAM_bandwidth: 256,
@@ -1395,6 +1566,7 @@ mod tests {
             waves_per_cu: 4,
             fd_per_cu: 4,
         };
+        // @TODO: 2 cycles are wasted
         let mut gpu_state = GPUState::new(&config);
         let program = Program {
             ins: parse(
@@ -1452,21 +1624,21 @@ mod tests {
                 add_f32 r4.xyzw, r4.xyzw, vec4(1.0 1.0 0.0 1.0)
                 lt_f32 r4.xy, r4.ww, vec2(3.0 2.0)
                 utof r4.xy, r4.xy
-                br r4.x, LB_0, LB_1, LB_2
+                br_push r4.x, LB_1, LB_2
                 LB_0:
                 mov r0.x, vec1(666.0)
-                br r4.y, LB_0_0, LB_0_1, LB_0_2
+                br_push r4.y, LB_0_1, LB_0_2
                 LB_0_0:
                 mov r0.y, vec1(666.0)
-                pop
+                pop_mask
                 LB_0_1:
                 mov r0.y, vec1(777.0)
-                pop
+                pop_mask
                 LB_0_2:
-                pop
+                pop_mask
                 LB_1:
                 mov r0.x, vec1(777.0)
-                pop
+                pop_mask
                 LB_2:
                 mov r4.y, lane_id
                 utof r4.y, r4.y
@@ -1533,14 +1705,14 @@ mod tests {
                 mov r2.x, r3.w
                 add_f32 r1.xyzw, r2.xyzw, r3.wzxy
                 mov r4.xyzw, vec4 ( 1.0 2.0 3.0 5.0 )
-                pop
+                pop_mask
                 ret
                 LB_1:
-                br r1.x, LB_1, LB_2, LB_3
+                br_push r1.x, LB_2, LB_3
                 LB_2:
-                pop
+                pop_mask
                 LB_3:
-                pop
+                pop_mask
                 ret
                 lt_f32 r1.x, r2.x, r3.y
                 mov r4.w, thread_id
@@ -1632,7 +1804,7 @@ mod tests {
                     ]
                 },
                 Instruction {
-                    ty: InstTy::POP,
+                    ty: InstTy::POP_MASK,
                     interp: Interpretation::NONE,
                     line: 5,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE,]
@@ -1644,7 +1816,7 @@ mod tests {
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE,]
                 },
                 Instruction {
-                    ty: InstTy::BR,
+                    ty: InstTy::BR_PUSH,
                     interp: Interpretation::NONE,
                     line: 8,
                     ops: [
@@ -1657,19 +1829,19 @@ mod tests {
                                 Component::NONE
                             ]
                         }),
-                        Operand::Label(6),
                         Operand::Label(7),
-                        Operand::Label(8)
+                        Operand::Label(8),
+                        Operand::NONE,
                     ]
                 },
                 Instruction {
-                    ty: InstTy::POP,
+                    ty: InstTy::POP_MASK,
                     interp: Interpretation::NONE,
                     line: 10,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
                 },
                 Instruction {
-                    ty: InstTy::POP,
+                    ty: InstTy::POP_MASK,
                     interp: Interpretation::NONE,
                     line: 12,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
@@ -1961,7 +2133,7 @@ mod tests {
         });
 
         // 8: lt_f32 r1.x, r1.y, vec1(2.0f)
-        // 9: br r1.x, LB_0, LB_1, LB_3
+        // 9: br_push r1.x, LB_1, LB_3
         //10: LB_0:
         //11: mov r1.x, vec1(1.0f)
         //12: pop
@@ -1999,7 +2171,7 @@ mod tests {
         });
         program.ins.push(Instruction {
             interp: Interpretation::F32,
-            ty: InstTy::BR,
+            ty: InstTy::BR_PUSH,
             line: 9,
             ops: [
                 Operand::VRegister(RegRef {
@@ -2011,9 +2183,9 @@ mod tests {
                         Component::NONE,
                     ],
                 }),
-                Operand::Label(9),
                 Operand::Label(11),
                 Operand::Label(13),
+                Operand::NONE,
             ],
         });
         program.ins.push(Instruction {
@@ -2037,7 +2209,7 @@ mod tests {
         });
         program.ins.push(Instruction {
             interp: Interpretation::NONE,
-            ty: InstTy::POP,
+            ty: InstTy::POP_MASK,
             line: 12,
             ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE],
         });
@@ -2062,7 +2234,7 @@ mod tests {
         });
         program.ins.push(Instruction {
             interp: Interpretation::NONE,
-            ty: InstTy::POP,
+            ty: InstTy::POP_MASK,
             line: 15,
             ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE],
         });
@@ -2078,3 +2250,10 @@ mod tests {
         while clock(&mut gpu_state) {}
     }
 }
+// @Papers
+//
+// A. Bakhoda, G.L. Yuan, W.W.L. Fung, H. Wong, T.M. Aamodt.
+// "Analyzing CUDA workloads using a detailed GPU simulator,"
+// Performance Analysis of Systems and Software, 2009. ISPASS 2009.
+//
+//
