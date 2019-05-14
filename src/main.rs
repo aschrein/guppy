@@ -1192,7 +1192,7 @@ fn parse(text: &str) -> Vec<Instruction> {
             Regex::new(r"vec3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V1FRE: Regex = Regex::new(r"vec1[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
         static ref spaceRE: Regex = Regex::new(r"[ ]+").unwrap();
-        static ref garbageRE: Regex = Regex::new(r"^[ ]+|[ ]+$|[\t]+").unwrap();
+        static ref garbageRE: Regex = Regex::new(r"^[ ]+|[ ]+$|[\t]+|;.*").unwrap();
         static ref labelRE: Regex = Regex::new(r"^[ ]*([^ ]+)[ ]*:[ ]*").unwrap();
     }
     let mapSwizzle = |c: char| -> Component {
@@ -1506,10 +1506,14 @@ mod tests {
             LB_1:
                 mov r0.x, vec1(777.0)
 
+                ; push the current wave mask
                 push_mask LOOP_END
             LOOP_PROLOG:
                 lt_f32 r4.x, r4.w, vec1(8.0)
                 add_f32 r4.w, r4.w, vec1(1.0)
+                ; Setting current lane mask
+                ; If all lanes are disabled pop_mask is invoked
+                ; If mask stack is empty then wave is retired
                 mask_nz r4.x
             LOOP_BEGIN:
                 jmp LOOP_PROLOG
