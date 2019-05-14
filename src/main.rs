@@ -1476,7 +1476,7 @@ mod tests {
             SLM_banks: 32,
             VGPRF_per_pe: 8,
             SGPRF_per_wave: 16,
-            wave_size: 32,
+            wave_size: 8,
             CU_count: 2,
             ALU_per_cu: 2,
             waves_per_cu: 4,
@@ -1490,8 +1490,8 @@ mod tests {
                 utof r4.xyzw, r4.wwww
                 mov r4.z, wave_id
                 utof r4.z, r4.z
-                add_f32 r4.xyzw, r4.xyzw, vec4(1.0 1.0 0.0 1.0)
-                lt_f32 r4.xy, r4.ww, vec2(16.0 8.0)
+                add_f32 r4.xyzw, r4.xyzw, vec4(0.0 0.0 0.0 1.0)
+                lt_f32 r4.xy, r4.ww, vec2(4.0 2.0)
                 utof r4.xy, r4.xy
                 br_push r4.x, LB_1, LB_2
                 mov r0.x, vec1(666.0)
@@ -1508,7 +1508,7 @@ mod tests {
 
                 push_mask LOOP_END
             LOOP_PROLOG:
-                lt_f32 r4.x, r4.w, vec1(32.0)
+                lt_f32 r4.x, r4.w, vec1(8.0)
                 add_f32 r4.w, r4.w, vec1(1.0)
                 mask_nz r4.x
             LOOP_BEGIN:
@@ -1524,22 +1524,81 @@ mod tests {
                 ",
             ),
         };
-        dispatch(&mut gpu_state, &program, 64, 1);
+        dispatch(&mut gpu_state, &program, 8, 1);
+        let mut mask_history: Vec<Vec<u32>> = Vec::new();
         while clock(&mut gpu_state) {
             for cu in &gpu_state.cus {
                 for wave in &cu.waves {
                     if wave.enabled {
-                        print!("{}:\t", wave.pc);
-                        for bit in &wave.exec_mask {
-                            print!("{}", if *bit { 1 } else { 0 });
-                        }
-                        print!(" ");
+                        mask_history.push(
+                            wave.exec_mask
+                                .iter()
+                                .map(|&b| if b { 1 } else { 0 })
+                                .collect::<Vec<_>>(),
+                        );
+                        // print!("{}:\t", wave.pc);
+                        // for bit in &wave.exec_mask {
+                        //     print!("{}", if *bit { 1 } else { 0 });
+                        // }
+                        // print!(" ");
+
+                        // println!(
+                        //     "vec!{:?},",
+                        //     wave.exec_mask
+                        //         .iter()
+                        //         .map(|&b| if b { 1 } else { 0 })
+                        //         .collect::<Vec<_>>()
+                        // );
                     }
                 }
-                print!(" ");
+                // print!(" ");
             }
-            println!("");
+            // println!("");
         }
+        assert_eq!(
+            mask_history,
+            vec![
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 0, 0, 0, 0, 0],
+                vec![1, 1, 1, 0, 0, 0, 0, 0],
+                vec![1, 0, 0, 0, 0, 0, 0, 0],
+                vec![1, 0, 0, 0, 0, 0, 0, 0],
+                vec![0, 1, 1, 0, 0, 0, 0, 0],
+                vec![0, 1, 1, 0, 0, 0, 0, 0],
+                vec![1, 1, 1, 0, 0, 0, 0, 0],
+                vec![0, 0, 0, 1, 1, 1, 1, 1],
+                vec![0, 0, 0, 1, 1, 1, 1, 1],
+                vec![0, 0, 0, 1, 1, 1, 1, 1],
+                vec![0, 0, 0, 1, 1, 1, 1, 1],
+                vec![0, 0, 0, 1, 1, 1, 1, 1],
+                vec![0, 0, 0, 1, 1, 1, 1, 0],
+                vec![0, 0, 0, 1, 1, 1, 1, 0],
+                vec![0, 0, 0, 1, 1, 1, 1, 0],
+                vec![0, 0, 0, 1, 1, 1, 1, 0],
+                vec![0, 0, 0, 1, 1, 1, 0, 0],
+                vec![0, 0, 0, 1, 1, 1, 0, 0],
+                vec![0, 0, 0, 1, 1, 1, 0, 0],
+                vec![0, 0, 0, 1, 1, 1, 0, 0],
+                vec![0, 0, 0, 1, 1, 0, 0, 0],
+                vec![0, 0, 0, 1, 1, 0, 0, 0],
+                vec![0, 0, 0, 1, 1, 0, 0, 0],
+                vec![0, 0, 0, 1, 1, 0, 0, 0],
+                vec![0, 0, 0, 1, 0, 0, 0, 0],
+                vec![0, 0, 0, 1, 0, 0, 0, 0],
+                vec![0, 0, 0, 1, 0, 0, 0, 0],
+                vec![0, 0, 0, 1, 0, 0, 0, 0],
+                vec![0, 0, 0, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+                vec![1, 1, 1, 1, 1, 1, 1, 1],
+            ]
+        )
     }
 
     #[test]
