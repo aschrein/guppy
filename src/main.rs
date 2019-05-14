@@ -54,6 +54,42 @@ fn AddU32(this: &Value, that: &Value) -> Value {
     ]
 }
 
+fn SubU32(this: &Value, that: &Value) -> Value {
+    [
+        this[0] - that[0],
+        this[1] - that[1],
+        this[2] - that[2],
+        this[3] - that[3],
+    ]
+}
+
+fn MulU32(this: &Value, that: &Value) -> Value {
+    [
+        this[0] * that[0],
+        this[1] * that[1],
+        this[2] * that[2],
+        this[3] * that[3],
+    ]
+}
+
+fn DivU32(this: &Value, that: &Value) -> Value {
+    [
+        this[0] / that[0],
+        this[1] / that[1],
+        this[2] / that[2],
+        this[3] / that[3],
+    ]
+}
+
+fn LTU32(this: &Value, that: &Value) -> Value {
+    [
+        if this[0] < that[0] { 1 } else { 0 },
+        if this[1] < that[1] { 1 } else { 0 },
+        if this[2] < that[2] { 1 } else { 0 },
+        if this[3] < that[3] { 1 } else { 0 },
+    ]
+}
+
 fn AddF32(this_: &Value, that_: &Value) -> Value {
     let this = castToFValue(this_);
     let that = castToFValue(that_);
@@ -209,34 +245,6 @@ impl WaveState {
                 .map(|r| applyReadSwizzle(&r.val, &vop))
                 .collect::<Vec<Value>>(),
             Operand::Immediate(imm) => match imm {
-                ImmediateVal::V4F(x, y, z, w) => {
-                    let mut values: Vec<Value> = Vec::new();
-                    for i in 0..wave_width {
-                        values.push(castToValue(&[*x, *y, *z, *w]));
-                    }
-                    values
-                }
-                ImmediateVal::V3F(x, y, z) => {
-                    let mut values: Vec<Value> = Vec::new();
-                    for i in 0..wave_width {
-                        values.push(castToValue(&[*x, *y, *z, 0.0]));
-                    }
-                    values
-                }
-                ImmediateVal::V2F(x, y) => {
-                    let mut values: Vec<Value> = Vec::new();
-                    for i in 0..wave_width {
-                        values.push(castToValue(&[*x, *y, 0.0, 0.0]));
-                    }
-                    values
-                }
-                ImmediateVal::V1F(x) => {
-                    let mut values: Vec<Value> = Vec::new();
-                    for i in 0..wave_width {
-                        values.push(castToValue(&[*x, 0.0, 0.0, 0.0]));
-                    }
-                    values
-                }
                 ImmediateVal::V4F(x, y, z, w) => {
                     let mut values: Vec<Value> = Vec::new();
                     for i in 0..wave_width {
@@ -1125,6 +1133,15 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                             InstTy::LT => LTF32(&x1, &x2),
                                             _ => std::panic!(""),
                                         },
+                                        Interpretation::U32 => match inst.ty {
+                                            InstTy::ADD => AddU32(&x1, &x2),
+                                            InstTy::SUB => SubU32(&x1, &x2),
+                                            InstTy::MUL => MulU32(&x1, &x2),
+                                            InstTy::DIV => DivU32(&x1, &x2),
+                                            InstTy::LT => LTU32(&x1, &x2),
+                                            _ => std::panic!(""),
+                                        },
+
                                         _ => std::panic!(""),
                                     })
                                     .collect::<Vec<Value>>()
@@ -1191,6 +1208,12 @@ fn parse(text: &str) -> Vec<Instruction> {
         static ref V3FRE: Regex =
             Regex::new(r"vec3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V1FRE: Regex = Regex::new(r"vec1[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
+        static ref V4URE: Regex =
+            Regex::new(r"uvec4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V2URE: Regex = Regex::new(r"uvec2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V3URE: Regex =
+            Regex::new(r"uvec3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V1URE: Regex = Regex::new(r"uvec1[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
         static ref spaceRE: Regex = Regex::new(r"[ ]+").unwrap();
         static ref garbageRE: Regex = Regex::new(r"^[ ]+|[ ]+$|[\t]+|;.*").unwrap();
         static ref labelRE: Regex = Regex::new(r"^[ ]*([^ ]+)[ ]*:[ ]*").unwrap();
@@ -1227,6 +1250,34 @@ fn parse(text: &str) -> Vec<Instruction> {
                         swizzle[3].clone(),
                     ],
                 }
+            });
+        } else if let Some(x) = V4URE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V4U(
+                    x.get(1).unwrap().as_str().parse::<u32>().unwrap(),
+                    x.get(2).unwrap().as_str().parse::<u32>().unwrap(),
+                    x.get(3).unwrap().as_str().parse::<u32>().unwrap(),
+                    x.get(4).unwrap().as_str().parse::<u32>().unwrap(),
+                )
+            });
+        } else if let Some(x) = V3URE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V3U(
+                    x.get(1).unwrap().as_str().parse::<u32>().unwrap(),
+                    x.get(2).unwrap().as_str().parse::<u32>().unwrap(),
+                    x.get(4).unwrap().as_str().parse::<u32>().unwrap(),
+                )
+            });
+        } else if let Some(x) = V2URE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V2U(
+                    x.get(1).unwrap().as_str().parse::<u32>().unwrap(),
+                    x.get(2).unwrap().as_str().parse::<u32>().unwrap(),
+                )
+            });
+        } else if let Some(x) = V1URE.captures(s) {
+            return Operand::Immediate({
+                ImmediateVal::V1U(x.get(1).unwrap().as_str().parse::<u32>().unwrap())
             });
         } else if let Some(x) = V4FRE.captures(s) {
             return Operand::Immediate({
@@ -1360,6 +1411,26 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
                 }
             }
+            "add_u32" | "sub_u32" | "mul_u32" | "div_u32" | "lt_u32" => {
+                assert!(operands.len() == 3);
+                let dstRef = parseOperand(&operands[0]);
+                let src1Ref = parseOperand(&operands[1]);
+                let src2Ref = parseOperand(&operands[2]);
+                Instruction {
+                    ty: match command.as_str() {
+                        "add_u32" => InstTy::ADD,
+                        "sub_u32" => InstTy::SUB,
+                        "mul_u32" => InstTy::MUL,
+                        "div_u32" => InstTy::DIV,
+                        "lt_u32" => InstTy::LT,
+                        _ => std::panic!(""),
+                    },
+                    interp: Interpretation::U32,
+                    line: line_num as u32,
+                    ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
+                }
+            }
+
             "jmp" | "push_mask" => {
                 assert!(operands.len() == 1);
                 let label = label_map.get(&operands[0]).unwrap();
@@ -1457,6 +1528,181 @@ enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_mask_test_2() {
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 32,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 4,
+            fd_per_cu: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let program = Program {
+            ins: parse(
+                r"
+                mov r0.x, lane_id
+                mov r1.x, uvec1(0)
+                push_mask LOOP_END
+            LOOP_PROLOG:
+                lt_u32 r0.y, r0.x, uvec1(16)
+                add_u32 r0.x, r0.x, uvec1(1)
+                mask_nz r0.y
+            LOOP_BEGIN:
+                add_u32 r1.x, r1.x, uvec1(1)
+                jmp LOOP_PROLOG
+            LOOP_END:
+                ret
+                ",
+            ),
+        };
+        dispatch(&mut gpu_state, &program, 16, 1);
+        let mut mask_history: Vec<String> = Vec::new();
+        while clock(&mut gpu_state) {
+            for cu in &gpu_state.cus {
+                for wave in &cu.waves {
+                    if wave.enabled {
+                        mask_history.push(
+                            wave.exec_mask
+                                .iter()
+                                .map(|&b| if b { '1' } else { '0' })
+                                .collect(),
+                        );
+                        // print!("\"");
+                        // for bit in &wave.exec_mask {
+                        //     print!("{}", if *bit { 1 } else { 0 });
+                        // }
+                        // print!("\",");
+                    }
+                }
+            }
+            // println!("");
+        }
+        // println!(
+        //     "{:?}",
+        //     gpu_state.cus[0].waves[0].vgprfs[1]
+        //         .iter()
+        //         .map(|r| &r.val[0])
+        //         .collect::<Vec<_>>()
+        // );
+        assert_eq!(
+            vec![
+                16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0
+            ],
+            gpu_state.cus[0].waves[0].vgprfs[1]
+                .iter()
+                .map(|r| r.val[0])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            mask_history,
+            vec![
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111110000000000000000",
+                "11111111111111100000000000000000",
+                "11111111111111100000000000000000",
+                "11111111111111100000000000000000",
+                "11111111111111100000000000000000",
+                "11111111111111100000000000000000",
+                "11111111111111000000000000000000",
+                "11111111111111000000000000000000",
+                "11111111111111000000000000000000",
+                "11111111111111000000000000000000",
+                "11111111111111000000000000000000",
+                "11111111111110000000000000000000",
+                "11111111111110000000000000000000",
+                "11111111111110000000000000000000",
+                "11111111111110000000000000000000",
+                "11111111111110000000000000000000",
+                "11111111111100000000000000000000",
+                "11111111111100000000000000000000",
+                "11111111111100000000000000000000",
+                "11111111111100000000000000000000",
+                "11111111111100000000000000000000",
+                "11111111111000000000000000000000",
+                "11111111111000000000000000000000",
+                "11111111111000000000000000000000",
+                "11111111111000000000000000000000",
+                "11111111111000000000000000000000",
+                "11111111110000000000000000000000",
+                "11111111110000000000000000000000",
+                "11111111110000000000000000000000",
+                "11111111110000000000000000000000",
+                "11111111110000000000000000000000",
+                "11111111100000000000000000000000",
+                "11111111100000000000000000000000",
+                "11111111100000000000000000000000",
+                "11111111100000000000000000000000",
+                "11111111100000000000000000000000",
+                "11111111000000000000000000000000",
+                "11111111000000000000000000000000",
+                "11111111000000000000000000000000",
+                "11111111000000000000000000000000",
+                "11111111000000000000000000000000",
+                "11111110000000000000000000000000",
+                "11111110000000000000000000000000",
+                "11111110000000000000000000000000",
+                "11111110000000000000000000000000",
+                "11111110000000000000000000000000",
+                "11111100000000000000000000000000",
+                "11111100000000000000000000000000",
+                "11111100000000000000000000000000",
+                "11111100000000000000000000000000",
+                "11111100000000000000000000000000",
+                "11111000000000000000000000000000",
+                "11111000000000000000000000000000",
+                "11111000000000000000000000000000",
+                "11111000000000000000000000000000",
+                "11111000000000000000000000000000",
+                "11110000000000000000000000000000",
+                "11110000000000000000000000000000",
+                "11110000000000000000000000000000",
+                "11110000000000000000000000000000",
+                "11110000000000000000000000000000",
+                "11100000000000000000000000000000",
+                "11100000000000000000000000000000",
+                "11100000000000000000000000000000",
+                "11100000000000000000000000000000",
+                "11100000000000000000000000000000",
+                "11000000000000000000000000000000",
+                "11000000000000000000000000000000",
+                "11000000000000000000000000000000",
+                "11000000000000000000000000000000",
+                "11000000000000000000000000000000",
+                "10000000000000000000000000000000",
+                "10000000000000000000000000000000",
+                "10000000000000000000000000000000",
+                "10000000000000000000000000000000",
+                "10000000000000000000000000000000",
+                "11111111111111110000000000000000",
+            ]
+        )
+    }
 
     #[test]
     fn exec_mask_test() {
@@ -2319,4 +2565,17 @@ mod tests {
 // "Analyzing CUDA workloads using a detailed GPU simulator,"
 // Performance Analysis of Systems and Software, 2009. ISPASS 2009.
 //
+//
+// @TODOLIST
+// * shuffle instructions
+// * memory io instructions
+//     * buffer/texture binding mechanism
+//     * cache system
+//     * sampling system
+//     * atomic operations
+// * thread group instructions
+//     * barriers
+//     * fences
+//     * SLM
+//     * atomics
 //
