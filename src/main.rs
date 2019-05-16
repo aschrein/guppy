@@ -1392,18 +1392,18 @@ fn parse(text: &str) -> Vec<Instruction> {
                 }
             }
 
-            "add_f32" | "sub_f32" | "mul_f32" | "div_f32" | "lt_f32" => {
+            "add.f32" | "sub.f32" | "mul.f32" | "div.f32" | "lt.f32" => {
                 assert!(operands.len() == 3);
                 let dstRef = parseOperand(&operands[0]);
                 let src1Ref = parseOperand(&operands[1]);
                 let src2Ref = parseOperand(&operands[2]);
                 Instruction {
                     ty: match command.as_str() {
-                        "add_f32" => InstTy::ADD,
-                        "sub_f32" => InstTy::SUB,
-                        "mul_f32" => InstTy::MUL,
-                        "div_f32" => InstTy::DIV,
-                        "lt_f32" => InstTy::LT,
+                        "add.f32" => InstTy::ADD,
+                        "sub.f32" => InstTy::SUB,
+                        "mul.f32" => InstTy::MUL,
+                        "div.f32" => InstTy::DIV,
+                        "lt.f32" => InstTy::LT,
                         _ => std::panic!(""),
                     },
                     interp: Interpretation::F32,
@@ -1411,18 +1411,18 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
                 }
             }
-            "add_u32" | "sub_u32" | "mul_u32" | "div_u32" | "lt_u32" => {
+            "add.u32" | "sub.u32" | "mul.u32" | "div.u32" | "lt.u32" => {
                 assert!(operands.len() == 3);
                 let dstRef = parseOperand(&operands[0]);
                 let src1Ref = parseOperand(&operands[1]);
                 let src2Ref = parseOperand(&operands[2]);
                 Instruction {
                     ty: match command.as_str() {
-                        "add_u32" => InstTy::ADD,
-                        "sub_u32" => InstTy::SUB,
-                        "mul_u32" => InstTy::MUL,
-                        "div_u32" => InstTy::DIV,
-                        "lt_u32" => InstTy::LT,
+                        "add.u32" => InstTy::ADD,
+                        "sub.u32" => InstTy::SUB,
+                        "mul.u32" => InstTy::MUL,
+                        "div.u32" => InstTy::DIV,
+                        "lt.u32" => InstTy::LT,
                         _ => std::panic!(""),
                     },
                     interp: Interpretation::U32,
@@ -1561,11 +1561,11 @@ mod tests {
                 mov r1.x, uvec1(0)
                 push_mask LOOP_END
             LOOP_PROLOG:
-                lt_u32 r0.y, r0.x, uvec1(16)
-                add_u32 r0.x, r0.x, uvec1(1)
+                lt.u32 r0.y, r0.x, uvec1(16)
+                add.u32 r0.x, r0.x, uvec1(1)
                 mask_nz r0.y
             LOOP_BEGIN:
-                add_u32 r1.x, r1.x, uvec1(1)
+                add.u32 r1.x, r1.x, uvec1(1)
                 jmp LOOP_PROLOG
             LOOP_END:
                 ret
@@ -1736,8 +1736,8 @@ mod tests {
                 utof r4.xyzw, r4.wwww
                 mov r4.z, wave_id
                 utof r4.z, r4.z
-                add_f32 r4.xyzw, r4.xyzw, vec4(0.0 0.0 0.0 1.0)
-                lt_f32 r4.xy, r4.ww, vec2(4.0 2.0)
+                add.f32 r4.xyzw, r4.xyzw, vec4(0.0 0.0 0.0 1.0)
+                lt.f32 r4.xy, r4.ww, vec2(4.0 2.0)
                 utof r4.xy, r4.xy
                 br_push r4.x, LB_1, LB_2
                 mov r0.x, vec1(666.0)
@@ -1755,8 +1755,8 @@ mod tests {
                 ; push the current wave mask
                 push_mask LOOP_END
             LOOP_PROLOG:
-                lt_f32 r4.x, r4.w, vec1(8.0)
-                add_f32 r4.w, r4.w, vec1(1.0)
+                lt.f32 r4.x, r4.w, vec1(8.0)
+                add.f32 r4.w, r4.w, vec1(1.0)
                 ; Setting current lane mask
                 ; If all lanes are disabled pop_mask is invoked
                 ; If mask stack is empty then wave is retired
@@ -1884,8 +1884,8 @@ mod tests {
                 mov r5.y, vec1(2.0)
                 mov r0.x, vec1(1.0)
                 mov r1.x, vec1(2.0)
-                div_f32 r4.x, r5.y, r4.x
-                div_f32 r2.x, r0.x, r1.x
+                div.f32 r4.x, r5.y, r4.x
+                div.f32 r2.x, r0.x, r1.x
                 ret
                 ",
             ),
@@ -1930,8 +1930,8 @@ mod tests {
                 utof r4.xyzw, r4.wwww
                 mov r4.z, wave_id
                 utof r4.z, r4.z
-                add_f32 r4.xyzw, r4.xyzw, vec4(1.0 1.0 0.0 1.0)
-                lt_f32 r4.xy, r4.ww, vec2(3.0 2.0)
+                add.f32 r4.xyzw, r4.xyzw, vec4(1.0 1.0 0.0 1.0)
+                lt.f32 r4.xy, r4.ww, vec2(3.0 2.0)
                 utof r4.xy, r4.xy
                 br_push r4.x, LB_1, LB_2
                 LB_0:
@@ -2012,7 +2012,7 @@ mod tests {
             r"
                 mov r1.xyzw, r2.xyzw
                 mov r2.x, r3.w
-                add_f32 r1.xyzw, r2.xyzw, r3.wzxy
+                add.f32 r1.xyzw, r2.xyzw, r3.wzxy
                 mov r4.xyzw, vec4 ( 1.0 2.0 3.0 5.0 )
                 pop_mask
                 ret
@@ -2023,7 +2023,7 @@ mod tests {
                 LB_3:
                 pop_mask
                 ret
-                lt_f32 r1.x, r2.x, r3.y
+                lt.f32 r1.x, r2.x, r3.y
                 mov r4.w, thread_id
                 mov r4.w, lane_id
                 mov r4.w, wave_id
@@ -2564,6 +2564,14 @@ mod tests {
 // A. Bakhoda, G.L. Yuan, W.W.L. Fung, H. Wong, T.M. Aamodt.
 // "Analyzing CUDA workloads using a detailed GPU simulator,"
 // Performance Analysis of Systems and Software, 2009. ISPASS 2009.
+//
+// S. Collange.
+// "Stack-less SIMT Reconvergence at Low Cost."
+// TechnicalReport hal-00622654, Universit ́e de Lyon, September 2011.
+//
+// Lee,  R.  Krashinsky,  V.  Grover,  S.  W.  Keckler,  and  K.  Asanovic,
+// “Convergence and scalarization for data-parallel architectures"
+//  2013  IEEE/ACM  InternationalSymposium on, pp. 1–11, 2013.
 //
 //
 // @TODOLIST
