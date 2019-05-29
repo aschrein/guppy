@@ -177,7 +177,18 @@ type ExecMask = Vec<bool>;
 type VGPRF = Vec<Register>;
 type SGPRF = Vec<Register>;
 
+#[derive(Clone, Debug)]
+enum View {
+    BUFFER(Buffer),
+    TEXTURE2D(Texture2D),
+    NONE,
+}
+
 struct WaveState {
+    // t0..t63 registers
+    r_views: Vec<View>,
+    // u0..u63 registers
+    rw_views: Vec<View>,
     // Array of vector registers, vgprfs[0] means array of r0 for each laneS
     vgprfs: Vec<VGPRF>,
     sgprf: SGPRF,
@@ -224,6 +235,8 @@ impl WaveState {
     }
     fn new(config: &GPUConfig) -> WaveState {
         WaveState {
+            r_views: Vec::new(),
+            rw_views: Vec::new(),
             vgprfs: Vec::new(),
             sgprf: Vec::new(),
             wave_id: 0,
@@ -343,6 +356,8 @@ impl WaveState {
         &mut self,
         config: &GPUConfig,
         program: &Rc<Program>,
+        r_views: &Vec<View>,
+        rw_views: &Vec<View>,
         wave_id: u32,
         group_id: u32,
         group_size: u32,
@@ -380,6 +395,8 @@ impl WaveState {
         self.group_size = group_size;
         self.has_been_dispatched = false;
         self.enabled = true;
+        self.r_views = r_views.to_vec().clone();
+        self.rw_views = rw_views.to_vec().clone();
     }
 }
 
@@ -518,6 +535,8 @@ struct GPUState {
     l2: L2State,
     // queue for future work
     dreqs: Vec<DispatchReq>,
+    // Well, memory
+    mem: Vec<u32>,
     // factory settings
     config: GPUConfig,
 }
@@ -533,6 +552,7 @@ impl GPUState {
             l2: L2State {},
             dreqs: Vec::new(),
             config: config.clone(),
+            mem: Vec::new(),
             clock_counter: 0,
         }
     }
@@ -615,13 +635,15 @@ enum Component {
     NONE,
 }
 
+#[derive(Clone, Debug)]
 struct Buffer {
-    raw_data: Vec<u8>,
+    offset: u32,
     size: u32,
 }
 
-struct Texture {
-    raw_data: Vec<u8>,
+#[derive(Clone, Debug)]
+struct Texture2D {
+    offset: u32,
     pitch: u32,
     height: u32,
 }
@@ -665,12 +687,12 @@ struct RegRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct BufferRef {
+struct RMemRef {
     id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct TextureRef {
+struct RWMemRef {
     id: u32,
 }
 
@@ -703,8 +725,8 @@ enum BuiltinVal {
 enum Operand {
     VRegister(RegRef),
     SRegister(RegRef),
-    Buffer(BufferRef),
-    Texture(TextureRef),
+    RMemory(RMemRef),
+    RWMemory(RWMemRef),
     Immediate(ImmediateVal),
     Builtin(BuiltinVal),
     Label(u32),
@@ -808,15 +830,26 @@ struct Program {
 
 struct DispatchReq {
     program: Rc<Program>,
+    r_views: Vec<View>,
+    rw_views: Vec<View>,
     group_size: u32,
     group_count: u32,
 }
 
-fn dispatch(gpu_state: &mut GPUState, program: &Program, group_size: u32, group_count: u32) {
+fn dispatch(
+    gpu_state: &mut GPUState,
+    program: &Program,
+    r_views: Vec<View>,
+    rw_views: Vec<View>,
+    group_size: u32,
+    group_count: u32,
+) {
     let disp_req = DispatchReq {
         program: Rc::new(program.clone()),
         group_count: group_count,
         group_size: group_size,
+        r_views: r_views,
+        rw_views: rw_views,
     };
     gpu_state.dreqs.push(disp_req);
 }
@@ -868,6 +901,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             gpu_state.cus[wave_path.0].waves[wave_path.1].dispatch(
                                 config,
                                 &req.program,
+                                &req.r_views,
+                                &req.rw_views,
                                 wave_id,
                                 group_id,
                                 req.group_size,
@@ -941,6 +976,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 Operand::Immediate(imm) => {}
                                 Operand::Builtin(buiiltin) => {}
                                 Operand::Label(label) => {}
+                                Operand::RMemory(mr) => {}
+                                Operand::RWMemory(mr) => {}
                                 Operand::NONE => {}
                                 _ => {
                                     std::panic!("");
@@ -948,7 +985,12 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             }
                         }
                         match &inst.ty {
-                            InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
+                            InstTy::ADD
+                            | InstTy::SUB
+                            | InstTy::MUL
+                            | InstTy::DIV
+                            | InstTy::LT
+                            | InstTy::LD => {
                                 inst.assertThreeOp();
                             }
                             InstTy::BR_PUSH
@@ -995,6 +1037,30 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             }
                             wave.enabled = false;
                             continue;
+                        } else if let InstTy::LD = inst.ty {
+                            let addr = wave.getValues(&inst.ops[2]);
+                            if let Operand::VRegister(dst) = &inst.ops[0] {
+                                for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate()
+                                {
+                                    if wave.exec_mask[i] {
+                                        // item.locked = true;
+                                        let mem_offset = match &inst.ops[1] {
+                                            Operand::RMemory(rm) => {
+                                                match &wave.r_views[rm.id as usize] {
+                                                    View::BUFFER(buf) => buf.offset + addr[i][0],
+                                                    _ => std::panic!(""),
+                                                }
+                                            }
+                                            _ => std::panic!(""),
+                                        };
+                                        item.val[0] = gpu_state.mem[mem_offset as usize];
+                                    }
+                                }
+                            } else {
+                                std::panic!("")
+                            }
+                            wave.pc += 1;
+                            wave.has_been_dispatched = true;
                         } else if let InstTy::POP_MASK = inst.ty {
                             assert!(wave.exec_mask_stack.len() != 0);
                             let prev_mask = wave.exec_mask_stack.pop().unwrap();
@@ -1278,6 +1344,8 @@ fn parse(text: &str) -> Vec<Instruction> {
     let mut out: Vec<Instruction> = Vec::new();
     lazy_static! {
         static ref VRegRE: Regex = Regex::new(r"r([0-9]+)\.([xyzw]+)").unwrap();
+        static ref RMemRE: Regex = Regex::new(r"t([0-9]+)").unwrap();
+        static ref RWMemRE: Regex = Regex::new(r"u([0-9]+)").unwrap();
         static ref V4FRE: Regex =
             Regex::new(r"vec4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V2FRE: Regex = Regex::new(r"vec2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
@@ -1325,6 +1393,20 @@ fn parse(text: &str) -> Vec<Instruction> {
                         swizzle[2].clone(),
                         swizzle[3].clone(),
                     ],
+                }
+            });
+        } else if let Some(x) = RMemRE.captures(s) {
+            return Operand::RMemory({
+                let regnum = x.get(1).unwrap().as_str();
+                RMemRef {
+                    id: regnum.parse::<u32>().unwrap(),
+                }
+            });
+        } else if let Some(x) = RWMemRE.captures(s) {
+            return Operand::RWMemory({
+                let regnum = x.get(1).unwrap().as_str();
+                RWMemRef {
+                    id: regnum.parse::<u32>().unwrap(),
                 }
             });
         } else if let Some(x) = V4URE.captures(s) {
@@ -1441,6 +1523,22 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, srcRef, Operand::NONE, Operand::NONE],
                 }
             }
+            "ld" => {
+                assert!(operands.len() == 3);
+                let dstRef = parseOperand(&operands[0]);
+                let srcRef = parseOperand(&operands[1]);
+                let addrRef = parseOperand(&operands[2]);
+                Instruction {
+                    ty: match command.as_str() {
+                        "ld" => InstTy::LD,
+                        _ => std::panic!(""),
+                    },
+                    interp: Interpretation::NONE,
+                    line: line_num as u32,
+                    ops: [dstRef, srcRef, addrRef, Operand::NONE],
+                }
+            }
+
             "mask_nz" => {
                 assert!(operands.len() == 1);
                 let dstRef = parseOperand(&operands[0]);
@@ -1606,6 +1704,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mem_test() {
+        let res = parse(
+            r"
+                mov r1.x, thread_id
+                ld r2.x, t0, r1.x
+                ret
+                ",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 16,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 16,
+            fd_per_cu: 4,
+            ALU_pipe_len: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        gpu_state.mem = vec![666, 1, 2, 3, 4, 5, 6, 7, 8, 9, 777, 11, 12, 13, 14, 15];
+        let program = Program { ins: res };
+        dispatch(
+            &mut gpu_state,
+            &program,
+            vec![View::BUFFER(Buffer {
+                offset: 0,
+                size: 16 * 4,
+            })],
+            vec![],
+            16,
+            1,
+        );
+        while clock(&mut gpu_state) {}
+        assert_eq!(
+            vec![
+                666, 1, 2, 3, 4, 5, 6, 7, 8, 9, 777, 11, 12, 13, 14, 15
+            ],
+            gpu_state.cus[0].waves[0].vgprfs[2]
+                .iter()
+                .map(|r| r.val[0])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn hazard_test() {
         let res = parse(
             r"
@@ -1647,7 +1803,7 @@ mod tests {
         };
         let mut gpu_state = GPUState::new(&config);
         let program = Program { ins: res };
-        dispatch(&mut gpu_state, &program, 32, 1);
+        dispatch(&mut gpu_state, &program, vec![], vec![], 32, 1);
         while clock(&mut gpu_state) {}
         assert_eq!(
             vec![
@@ -1717,7 +1873,7 @@ mod tests {
                 ",
             ),
         };
-        dispatch(&mut gpu_state, &program, 16, 1);
+        dispatch(&mut gpu_state, &program, vec![], vec![], 16, 1);
         let mut mask_history: Vec<String> = Vec::new();
         while clock(&mut gpu_state) {
             for cu in &gpu_state.cus {
@@ -1920,7 +2076,7 @@ mod tests {
                 ",
             ),
         };
-        dispatch(&mut gpu_state, &program, 8, 1);
+        dispatch(&mut gpu_state, &program, vec![], vec![], 8, 1);
         let mut mask_history: Vec<Vec<u32>> = Vec::new();
         while clock(&mut gpu_state) {
             for cu in &gpu_state.cus {
@@ -2037,7 +2193,7 @@ mod tests {
                 ",
             ),
         };
-        dispatch(&mut gpu_state, &program, 4, 1);
+        dispatch(&mut gpu_state, &program, vec![], vec![], 4, 1);
         while clock(&mut gpu_state) {
             // @DEAD
             // for cu in &gpu_state.cus {
@@ -2054,7 +2210,7 @@ mod tests {
         }
         assert_eq!(11, gpu_state.clock_counter);
         let mut gpu_state = GPUState::new(&config);
-        dispatch(&mut gpu_state, &program, 8, 1);
+        dispatch(&mut gpu_state, &program, vec![], vec![], 8, 1);
         while clock(&mut gpu_state) {}
         assert_eq!(14, gpu_state.clock_counter);
 
@@ -2126,7 +2282,7 @@ mod tests {
         };
         let mut gpu_state = GPUState::new(&config);
         let program = Program { ins: res };
-        dispatch(&mut gpu_state, &program, 8, 1);
+        dispatch(&mut gpu_state, &program, vec![], vec![], 8, 1);
         while clock(&mut gpu_state) {}
         assert_eq!(
             vec![
@@ -2704,7 +2860,7 @@ mod tests {
         });
 
         // @Test
-        dispatch(&mut gpu_state, &program, 4, 1);
+        dispatch(&mut gpu_state, &program, vec![], vec![], 4, 1);
         while clock(&mut gpu_state) {}
     }
 }
