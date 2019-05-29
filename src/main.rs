@@ -15,7 +15,9 @@ type FValue = [f32; 4];
 #[derive(Clone, Copy, Debug)]
 struct Register {
     val: Value,
+    // Waits for an operation to WB
     locked: bool,
+    // As we buffer input operands we don't need to stall on WAR hazards
 }
 
 fn applyReadSwizzle(val: &Value, regref: &RegRef) -> Value {
@@ -381,20 +383,70 @@ impl WaveState {
     }
 }
 
-struct VALUState {
+#[derive(Clone, Debug)]
+// Dispatched instruction
+struct DispInstruction {
+    // Src ops buffer to avoid WAR hazards
+    // 3 is the max number of input ops per instruction
+    src: [Option<Vec<Value>>; 3],
     instr: Option<Instruction>,
     exec_mask: Option<Vec<bool>>,
     wave_id: u32,
     timer: u32,
-    busy: bool,
-    was_busy: bool,
+}
+
+struct VALUState {
+    // Size is fixed
+    pipe: Vec<Option<DispInstruction>>,
+}
+
+impl VALUState {
+    fn pop(&mut self) -> Option<DispInstruction> {
+        // Decrease the counter on those instructions
+        for item in &mut self.pipe {
+            if item.is_some() && item.as_ref().unwrap().timer > 0 {
+                item.as_mut().unwrap().timer -= 1;
+            }
+        }
+        // The last instruction stalls the pipe
+        if self.pipe.last().unwrap().is_some()
+            && self.pipe.last().unwrap().as_ref().unwrap().timer != 0
+        {
+            return None;
+        }
+        // Pop the last and shift the rest
+        let last = self.pipe.pop().unwrap();
+        // @TODO: There must be a better way to do this shift-register type of thing
+        let mut new_pipe: Vec<Option<DispInstruction>> = Vec::new();
+        new_pipe.push(None);
+        for item in &self.pipe {
+            if item.is_some() {
+                new_pipe.push(Some(item.as_ref().unwrap().clone()));
+            } else {
+                new_pipe.push(None);
+            }
+        }
+        self.pipe = new_pipe;
+        last
+    }
+    fn ready(&self) -> bool {
+        self.pipe.first().unwrap().is_none()
+    }
+    fn push(&mut self, inst: &DispInstruction) -> bool {
+        if self.pipe.first().unwrap().is_none() {
+            self.pipe[0] = Some(inst.clone());
+            return true;
+        }
+        false
+    }
 }
 
 struct SALUState {
-    instr: Option<Instruction>,
-    wave_id: u32,
-    timer: u32,
-    busy: bool,
+    // @TODO
+// instr: Option<Instruction>,
+// wave_id: u32,
+// timer: u32,
+// busy: bool,
 }
 
 struct SamplerState {}
@@ -432,21 +484,13 @@ impl CUState {
         let mut valus: Vec<VALUState> = Vec::new();
         let mut salus: Vec<SALUState> = Vec::new();
         for i in 0..config.ALU_per_cu {
-            valus.push(VALUState {
-                instr: None,
-                wave_id: 0,
-                timer: 0,
-                busy: false,
-                was_busy: false,
-                exec_mask: None,
-            });
+            let mut pipe: Vec<Option<DispInstruction>> = Vec::new();
+            for i in 0..config.ALU_pipe_len {
+                pipe.push(None);
+            }
+            valus.push(VALUState { pipe: pipe });
         }
-        salus.push(SALUState {
-            instr: None,
-            wave_id: 0,
-            timer: 0,
-            busy: false,
-        });
+        salus.push(SALUState {});
         let mut fes: Vec<FEState> = Vec::new();
         for i in 0..config.fd_per_cu {
             fes.push(FEState {});
@@ -559,6 +603,7 @@ struct GPUConfig {
     waves_per_cu: u32,
     // Number of fetch decode units per CU
     fd_per_cu: u32,
+    ALU_pipe_len: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -725,17 +770,36 @@ enum CmdStatus {
     COMPLETE,
 }
 
+type InstFn = Fn(&mut GPUState) -> CmdStatus;
+
 // Generator function for an instruction
-type InstGen = Box<Fn(&mut WaveState) -> CmdStatus>;
+type InstGen = Vec<Box<InstFn>>;
 
-trait ICmd {
-    fn prereq(&mut self, inst: &Instruction) -> bool;
-    fn start(&mut self) -> InstGen;
-}
+// fn matchInst(inst: &Instruction) -> InstGen {
+//     let pause = |time: u32| -> Box<InstFn> {
+//         let mut pauseTimer = time;
+//         Box::new(|gpustate: &mut GPUState| {
+//             pauseTimer -= 1;
+//             if pauseTimer == 0 {
+//                 CmdStatus::COMPLETE
+//             } else {
+//                 CmdStatus::YIELD
+//             }
+//         })
+//     };
+//     let mut out: InstGen = Vec::new();
+//     match &inst.ty {
+//         InstTy::MOV => {
+//             // out.push(Box::new(
+//             //     |gpustate: &mut GPUState| {
 
-fn matchInst(inst: &Instruction) -> Option<InstGen> {
-    None
-}
+//             //     }
+//             // ))
+//         }
+//         _ => std::panic!(),
+//     };
+//     out
+// }
 
 #[derive(Clone, Debug)]
 struct Program {
@@ -852,8 +916,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                         let mut hasSRegOps = false;
                         let mut dispatchOnSampler = false;
                         let mut control_flow_cmd = false;
-
                         let mut has_dep = false;
+
                         // Do simple decoding and sanity checks
                         for op in &inst.ops {
                             match &op {
@@ -1024,17 +1088,34 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                         // For simplicity dispatch commands basing only on registers used
                         else if hasVRegOps {
                             for valu in &mut cu.valus {
-                                if valu.busy {
+                                if !valu.ready() {
                                     continue;
                                 }
                                 wave.has_been_dispatched = true;
-                                valu.instr = Some(inst.clone());
-                                // @TODO: determine the timer value
-                                valu.timer = getLatency(&inst.ty);
-                                valu.busy = true;
-                                valu.wave_id = wave_id as u32;
-                                valu.exec_mask = Some(wave.exec_mask.clone());
-                                // Lock the destination registers
+                                let mut dispInst = DispInstruction {
+                                    exec_mask: Some(wave.exec_mask.clone()),
+                                    src: [None, None, None],
+                                    instr: Some(inst.clone()),
+                                    timer: getLatency(&inst.ty),
+                                    wave_id: wave_id as u32,
+                                };
+                                // Evaluate the source
+                                for (i, op) in inst.ops[1..].iter().enumerate() {
+                                    match op {
+                                        Operand::VRegister(vreg) => {
+                                            dispInst.src[i] = Some(wave.getValues(op));
+                                        }
+                                        Operand::Immediate(imm) => {
+                                            dispInst.src[i] = Some(wave.getValues(op));
+                                        }
+                                        Operand::Builtin(imm) => {
+                                            dispInst.src[i] = Some(wave.getValues(op));
+                                        }
+
+                                        _ => {}
+                                    }
+                                }
+                                // Lock the destination register
                                 match &inst.ty {
                                     InstTy::ADD
                                     | InstTy::SUB
@@ -1068,6 +1149,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                     }
                                     _ => std::panic!(""),
                                 }
+                                assert!(valu.push(&dispInst));
+
                                 // Successfully dispatched
                                 break;
                             }
@@ -1098,23 +1181,18 @@ fn clock(gpu_state: &mut GPUState) -> bool {
             // @ALU
             // Now do work on Vector ALUs
             for valu in &mut cu.valus {
-                valu.was_busy = false;
-                if !valu.busy {
-                    continue;
-                }
-                didSomeWork = true;
-                valu.was_busy = true;
-                if valu.timer != 0 {
-                    valu.timer -= 1;
-                }
-                if valu.timer == 0 {
-                    let inst = &valu.instr.as_ref().unwrap();
-                    let mut wave = &mut cu.waves[valu.wave_id as usize];
-                    let exec_mask = &valu.exec_mask.as_ref().unwrap();
+                let inst = valu.pop();
+                if inst.is_some() {
+                    didSomeWork = true;
+
+                    let dispInst = inst.unwrap();
+                    let mut wave = &mut cu.waves[dispInst.wave_id as usize];
+                    let exec_mask = &dispInst.exec_mask.as_ref().unwrap();
+                    let inst = dispInst.instr.unwrap();
                     match &inst.ty {
                         InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
-                            let src1 = wave.getValues(&inst.ops[1]);
-                            let src2 = wave.getValues(&inst.ops[2]);
+                            let src1 = dispInst.src[0].as_ref().unwrap();
+                            let src2 = dispInst.src[1].as_ref().unwrap();
                             let dst = match &inst.ops[0] {
                                 Operand::VRegister(dst) => dst,
                                 _ => std::panic!(""),
@@ -1158,7 +1236,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             }
                         }
                         InstTy::MOV | InstTy::UTOF => {
-                            let src1 = wave.getValues(&inst.ops[1]);
+                            let src1 = dispInst.src[0].as_ref().unwrap();
                             let dst = match &inst.ops[0] {
                                 Operand::VRegister(dst) => dst,
                                 _ => std::panic!(""),
@@ -1181,8 +1259,6 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                         }
                         _ => std::panic!("unsupported {:?}", inst.ops[0]),
                     };
-                    // wave.print();
-                    valu.busy = false;
                 }
             }
             // And on Scalar ALUs
@@ -1530,6 +1606,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hazard_test() {
+        let res = parse(
+            r"
+                mov r1.x, thread_id
+                mov r2.x, r1.x
+                utof r2.x, r2.x
+                ; RAW hazard
+                div.f32 r3.x, r2.x, vec1(2.0)
+                mov r4.x, r3.x
+                ; WAR hazard
+                div.f32 r5.x, r2.x, vec1(4.0)
+                mov r2.x, vec1(0.0)
+
+                ret
+                ",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 32,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 16,
+            fd_per_cu: 4,
+            ALU_pipe_len: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let program = Program { ins: res };
+        dispatch(&mut gpu_state, &program, 32, 1);
+        while clock(&mut gpu_state) {}
+        assert_eq!(
+            vec![
+                0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5,
+                8.0, 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5,
+                15.0, 15.5
+            ],
+            gpu_state.cus[0].waves[0].vgprfs[4]
+                .iter()
+                .map(|r| castToFValue(&r.val)[0])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![
+                0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5,
+                3.75, 4.0, 4.25, 4.5, 4.75, 5.0, 5.25, 5.5, 5.75, 6.0, 6.25, 6.5, 6.75, 7.0, 7.25,
+                7.5, 7.75
+            ],
+            gpu_state.cus[0].waves[0].vgprfs[5]
+                .iter()
+                .map(|r| castToFValue(&r.val)[0])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn exec_mask_test_2() {
         let config = GPUConfig {
             DRAM_latency: 300,
@@ -1552,6 +1696,7 @@ mod tests {
             ALU_per_cu: 2,
             waves_per_cu: 4,
             fd_per_cu: 4,
+            ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
         let program = Program {
@@ -1727,6 +1872,7 @@ mod tests {
             ALU_per_cu: 2,
             waves_per_cu: 4,
             fd_per_cu: 4,
+            ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
         let program = Program {
@@ -1874,6 +2020,7 @@ mod tests {
             ALU_per_cu: 2,
             waves_per_cu: 4,
             fd_per_cu: 4,
+            ALU_pipe_len: 1,
         };
         // @TODO: 2 cycles are wasted
         let mut gpu_state = GPUState::new(&config);
@@ -1975,6 +2122,7 @@ mod tests {
             ALU_per_cu: 2,
             waves_per_cu: 16,
             fd_per_cu: 4,
+            ALU_pipe_len: 4,
         };
         let mut gpu_state = GPUState::new(&config);
         let program = Program { ins: res };
@@ -2307,6 +2455,7 @@ mod tests {
             ALU_per_cu: 2,
             waves_per_cu: 16,
             fd_per_cu: 4,
+            ALU_pipe_len: 4,
         };
         let mut gpu_state = GPUState::new(&config);
         let mut program = Program { ins: Vec::new() };
@@ -2561,24 +2710,51 @@ mod tests {
 }
 // @Papers
 //
+// @SHORT Detailed overview of modern GPU architectures
 // A. Bakhoda, G.L. Yuan, W.W.L. Fung, H. Wong, T.M. Aamodt.
 // "Analyzing CUDA workloads using a detailed GPU simulator,"
 // Performance Analysis of Systems and Software, 2009. ISPASS 2009.
 //
+// @SHORT Nice overview of reconvergence mechanisms used in various real world hw
 // S. Collange.
 // "Stack-less SIMT Reconvergence at Low Cost."
 // TechnicalReport hal-00622654, Universit ́e de Lyon, September 2011.
 //
+// @SHORT Benefits of scalar path
 // Lee,  R.  Krashinsky,  V.  Grover,  S.  W.  Keckler,  and  K.  Asanovic,
 // “Convergence and scalarization for data-parallel architectures"
-//  2013  IEEE/ACM  InternationalSymposium on, pp. 1–11, 2013.
+// 2013  IEEE/ACM  InternationalSymposium on, pp. 1–11, 2013.
+//
+// @SHORT Detailed micro-benchmarking of instruction/memory hierarchy for Nvidia hw
+// H. Wong, M.-M. Papadopoulou, M. Sadooghi-Alvandi, andA. Moshovos.
+// "Demystifying GPU Microarchitecturethrough Microbenchmarking"
+// InInternational Symposiumon Performance Analysis of Systems and Software, pages235–246, March 2010.
+//
+// @SHORT Compilation of cpu/gpu architecture know hows
+// "Computer Architecture: A Quantitative Approach"
+// Book by David A Patterson and John L. Hennessy
+//
+// @SHORT Overview of intel integrated GPU architecture(Skylake)
+// Gera, Prasun, et al.
+// "Performance Characterisation and Simulation of Intel's Integrated GPU Architecture." 2018 I
+//
+// @SHORT Overview of various GPU simulation approaches
+// Kaszyk, Kuba, et al.
+// "Full-System Simulation of Mobile CPU/GPU Platforms." 2019
 //
 //
 // @TODOLIST
+// * Write tests for RAW, WAW and WAR register hazards, check for antidependency
+// * Add ALU pipelining
+//     * chime variability?
+// * Register bankning?
 // * shuffle instructions
 // * memory io instructions
 //     * buffer/texture binding mechanism
+//     * gather/scatter merging
+//         * cache line collision resolution between L1s(false sharing/coalescing)
 //     * cache system
+//         * banks
 //     * sampling system
 //     * atomic operations
 // * thread group instructions
