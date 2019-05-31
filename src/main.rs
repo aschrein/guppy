@@ -1185,6 +1185,14 @@ struct DispatchReq {
     group_count: u32,
 }
 
+fn lower_bound<'a, K : std::cmp::Ord, V>(tree: &'a BTreeMap<K, V>, val: &K) -> (&'a K, &'a V){
+    use std::ops::Bound::*;
+
+    let mut before = tree.range((Unbounded, Excluded(val)));
+
+    (before.next_back().unwrap().0, before.next_back().unwrap().1)
+}
+
 fn dispatch(
     gpu_state: &mut GPUState,
     program: &Program,
@@ -1193,6 +1201,35 @@ fn dispatch(
     group_size: u32,
     group_count: u32,
 ) {
+    // Check buffer aliasing
+    {
+        let mut tree: BTreeMap<u32, u32> = BTreeMap::new();
+        for view in &r_views {
+            match view {
+                View::BUFFER(buf) => {
+                    assert!(tree.insert(buf.offset, buf.size).is_none());
+                }
+                _ => std::panic!(""),
+            }
+        }
+        for view in &rw_views {
+            match view {
+                View::BUFFER(buf) => {
+                                        assert!(tree.insert(buf.offset, buf.size).is_none());
+
+                }
+                _ => std::panic!(""),
+            }
+        }
+        let mut prev_back : Option<u32> = None;
+        for (&offset, &size) in &tree {
+            if let Some(prev_back) = prev_back {
+                assert!(prev_back <= offset);
+            }
+            prev_back = Some(offset + size);
+        }
+        
+    }
     let disp_req = DispatchReq {
         program: Rc::new(program.clone()),
         group_count: group_count,
