@@ -1774,17 +1774,17 @@ fn parse(text: &str) -> Vec<Instruction> {
         static ref RMemRE: Regex = Regex::new(r"t([0-9]+)\.([xyzw]+)").unwrap();
         static ref RWMemRE: Regex = Regex::new(r"u([0-9]+)\.([xyzw]+)").unwrap();
         static ref V4FRE: Regex =
-            Regex::new(r"vec4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
-        static ref V2FRE: Regex = Regex::new(r"vec2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+            Regex::new(r"f4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V2FRE: Regex = Regex::new(r"f2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V3FRE: Regex =
-            Regex::new(r"vec3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
-        static ref V1FRE: Regex = Regex::new(r"vec1[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
+            Regex::new(r"f3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V1FRE: Regex = Regex::new(r"f[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
         static ref V4URE: Regex =
-            Regex::new(r"uvec4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
-        static ref V2URE: Regex = Regex::new(r"uvec2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+            Regex::new(r"u4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V2URE: Regex = Regex::new(r"u2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V3URE: Regex =
-            Regex::new(r"uvec3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
-        static ref V1URE: Regex = Regex::new(r"uvec1[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
+            Regex::new(r"u3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V1URE: Regex = Regex::new(r"u[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
         static ref spaceRE: Regex = Regex::new(r"[ ]+").unwrap();
         static ref garbageRE: Regex = Regex::new(r"^[ ]+|[ ]+$|[\t]+|;.*").unwrap();
         static ref labelRE: Regex = Regex::new(r"^[ ]*([^ ]+)[ ]*:[ ]*").unwrap();
@@ -2197,10 +2197,10 @@ mod tests {
         let res = parse(
             r"
                 mov r1.x, thread_id
-                mul.u32 r1.x, r1.x, uvec1(4)
+                mul.u32 r1.x, r1.x, u(4)
                 ld r2.x, t0.x, r1.x
-                add.u32 r1.y, r1.x, uvec1(128)
-                and r1.y, r1.y, uvec1(0xfff)
+                add.u32 r1.y, r1.x, u(128)
+                and r1.y, r1.y, u(0xfff)
                 ld r2.y, t0.x, r1.y
                 add.u32 r2.z, r2.x, r2.y
                 st u0.x, r1.x, r2.z
@@ -2272,9 +2272,9 @@ mod tests {
         let res = parse(
             r"
                 mov r1.x, thread_id
-                mul.u32 r1.x, r1.x, uvec1(4)
+                mul.u32 r1.x, r1.x, u(4)
                 ld r2.xy, t0.xw, r1.x
-                add.u32 r1.y, r1.x, uvec1(4)
+                add.u32 r1.y, r1.x, u(4)
                 ld r3.x, t0.x, r1.y
                 add.u32 r2.x, r2.x, r2.y
                 ;mov r2.x, r2.x
@@ -2356,11 +2356,11 @@ mod tests {
                 mov r2.x, r1.x
                 utof r2.x, r2.x
                 ; RAW hazard
-                div.f32 r3.x, r2.x, vec1(2.0)
+                div.f32 r3.x, r2.x, f(2.0)
                 mov r4.x, r3.x
                 ; WAR hazard
-                div.f32 r5.x, r2.x, vec1(4.0)
-                mov r2.x, vec1(0.0)
+                div.f32 r5.x, r2.x, f(4.0)
+                mov r2.x, f(0.0)
 
                 ret
                 ",
@@ -2446,14 +2446,14 @@ mod tests {
             ins: parse(
                 r"
                 mov r0.x, lane_id
-                mov r1.x, uvec1(0)
+                mov r1.x, u(0)
                 push_mask LOOP_END
             LOOP_PROLOG:
-                lt.u32 r0.y, r0.x, uvec1(16)
-                add.u32 r0.x, r0.x, uvec1(1)
+                lt.u32 r0.y, r0.x, u(16)
+                add.u32 r0.x, r0.x, u(1)
                 mask_nz r0.y
             LOOP_BEGIN:
-                add.u32 r1.x, r1.x, uvec1(1)
+                add.u32 r1.x, r1.x, u(1)
                 jmp LOOP_PROLOG
             LOOP_END:
                 ret
@@ -2625,27 +2625,27 @@ mod tests {
                 utof r4.xyzw, r4.wwww
                 mov r4.z, wave_id
                 utof r4.z, r4.z
-                add.f32 r4.xyzw, r4.xyzw, vec4(0.0 0.0 0.0 1.0)
-                lt.f32 r4.xy, r4.ww, vec2(4.0 2.0)
+                add.f32 r4.xyzw, r4.xyzw, f4(0.0 0.0 0.0 1.0)
+                lt.f32 r4.xy, r4.ww, f2(4.0 2.0)
                 utof r4.xy, r4.xy
                 br_push r4.x, LB_1, LB_2
-                mov r0.x, vec1(666.0)
+                mov r0.x, f(666.0)
                 br_push r4.y, LB_0_1, LB_0_2
-                mov r0.y, vec1(666.0)
+                mov r0.y, f(666.0)
                 pop_mask
             LB_0_1:
-                mov r0.y, vec1(777.0)
+                mov r0.y, f(777.0)
                 pop_mask
             LB_0_2:
                 pop_mask
             LB_1:
-                mov r0.x, vec1(777.0)
+                mov r0.x, f(777.0)
 
                 ; push the current wave mask
                 push_mask LOOP_END
             LOOP_PROLOG:
-                lt.f32 r4.x, r4.w, vec1(8.0)
-                add.f32 r4.w, r4.w, vec1(1.0)
+                lt.f32 r4.x, r4.w, f(8.0)
+                add.f32 r4.w, r4.w, f(1.0)
                 ; Setting current lane mask
                 ; If all lanes are disabled pop_mask is invoked
                 ; If mask stack is empty then wave is retired
@@ -2770,10 +2770,10 @@ mod tests {
         let program = Program {
             ins: parse(
                 r"
-                mov r4.x, vec1(8.0)
-                mov r5.y, vec1(2.0)
-                mov r0.x, vec1(1.0)
-                mov r1.x, vec1(2.0)
+                mov r4.x, f(8.0)
+                mov r5.y, f(2.0)
+                mov r0.x, f(1.0)
+                mov r1.x, f(2.0)
                 div.f32 r4.x, r5.y, r4.x
                 div.f32 r2.x, r0.x, r1.x
                 ret
@@ -2820,23 +2820,23 @@ mod tests {
                 utof r4.xyzw, r4.wwww
                 mov r4.z, wave_id
                 utof r4.z, r4.z
-                add.f32 r4.xyzw, r4.xyzw, vec4(1.0 1.0 0.0 1.0)
-                lt.f32 r4.xy, r4.ww, vec2(3.0 2.0)
+                add.f32 r4.xyzw, r4.xyzw, f4(1.0 1.0 0.0 1.0)
+                lt.f32 r4.xy, r4.ww, f2(3.0 2.0)
                 utof r4.xy, r4.xy
                 br_push r4.x, LB_1, LB_2
                 LB_0:
-                mov r0.x, vec1(666.0)
+                mov r0.x, f(666.0)
                 br_push r4.y, LB_0_1, LB_0_2
                 LB_0_0:
-                mov r0.y, vec1(666.0)
+                mov r0.y, f(666.0)
                 pop_mask
                 LB_0_1:
-                mov r0.y, vec1(777.0)
+                mov r0.y, f(777.0)
                 pop_mask
                 LB_0_2:
                 pop_mask
                 LB_1:
-                mov r0.x, vec1(777.0)
+                mov r0.x, f(777.0)
                 pop_mask
                 LB_2:
                 mov r4.y, lane_id
@@ -2904,7 +2904,7 @@ mod tests {
                 mov r1.xyzw, r2.xyzw
                 mov r2.x, r3.w
                 add.f32 r1.xyzw, r2.xyzw, r3.wzxy
-                mov r4.xyzw, vec4 ( 1.0 2.0 3.0 5.0 )
+                mov r4.xyzw, f4 ( 1.0 2.0 3.0 5.0 )
                 pop_mask
                 ret
                 LB_1:
@@ -3202,13 +3202,13 @@ mod tests {
         };
         let mut gpu_state = GPUState::new(&config);
         let mut program = Program { ins: Vec::new() };
-        // 1: mov r1.wzyx, vec4(1.0f, 1.0f, 1.0f, 0.0f)
-        // 2: mov r2.wzyx, vec4(1.0f, 2.0f, 3.0f, 4.0f)
+        // 1: mov r1.wzyx, f4(1.0f, 1.0f, 1.0f, 0.0f)
+        // 2: mov r2.wzyx, f4(1.0f, 2.0f, 3.0f, 4.0f)
         // 3: add_f32 r0.xyzw, r1.xyzw, r2.xyzw
         // 4: mov r1.w, thread_id
         // 5: utof r1.xyzw, r1.wwww
         // 6: add_f32 r3.xyzw, r1.xyzw, r2.xyzw
-        // 7: mov r4.w, vec1(777.0f)
+        // 7: mov r4.w, f(777.0f)
         program.ins.push(Instruction {
             interp: Interpretation::F32,
             ty: InstTy::MOV,
@@ -3333,13 +3333,13 @@ mod tests {
             ],
         });
 
-        // 8: lt_f32 r1.x, r1.y, vec1(2.0f)
+        // 8: lt_f32 r1.x, r1.y, f(2.0f)
         // 9: br_push r1.x, LB_1, LB_3
         //10: LB_0:
-        //11: mov r1.x, vec1(1.0f)
+        //11: mov r1.x, f(1.0f)
         //12: pop
         //13: LB_1:
-        //14: mov r1.x, vec1(0.0f)
+        //14: mov r1.x, f(0.0f)
         //15: pop
         //16: LB_3:
         //17: ret
