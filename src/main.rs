@@ -1401,7 +1401,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                                 match &wave.r_views[rm.id as usize] {
                                                     View::BUFFER(buf) => {
                                                         let mem_offset = buf.offset + addr[i][0];
-                                                        applyReadSwizzle(
+                                                        let val = applyReadSwizzle(
                                                             &[
                                                                 mem_offset,
                                                                 mem_offset + 4,
@@ -1409,7 +1409,18 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                                                 mem_offset + 12,
                                                             ],
                                                             &rm.comps,
-                                                        )
+                                                        );
+                                                        // Boundary checks
+                                                        for i in 0..4 {
+                                                            if val[i] > 0 {
+                                                                assert!(
+                                                                    val[i] >= buf.offset
+                                                                        && val[i]
+                                                                            < buf.offset + buf.size
+                                                                );
+                                                            }
+                                                        }
+                                                        val
                                                     }
                                                     _ => std::panic!(""),
                                                 }
@@ -1460,6 +1471,16 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                                             ],
                                                             &rm.comps,
                                                         );
+                                                        // Boundary checks
+                                                        for i in 0..4 {
+                                                            if val[i] > 0 {
+                                                                assert!(
+                                                                    val[i] * 4 >= buf.offset
+                                                                        && val[i] * 4
+                                                                            < buf.offset + buf.size
+                                                                );
+                                                            }
+                                                        }
                                                         (val, mem_offset)
                                                     }
                                                     _ => std::panic!(""),
@@ -1776,14 +1797,12 @@ fn parse(text: &str) -> Vec<Instruction> {
         static ref V4FRE: Regex =
             Regex::new(r"f4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V2FRE: Regex = Regex::new(r"f2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
-        static ref V3FRE: Regex =
-            Regex::new(r"f3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V3FRE: Regex = Regex::new(r"f3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V1FRE: Regex = Regex::new(r"f[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
         static ref V4URE: Regex =
             Regex::new(r"u4[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V2URE: Regex = Regex::new(r"u2[ ]*\([ ]*([^ ]+) ([^ ]+)[ ]*\)").unwrap();
-        static ref V3URE: Regex =
-            Regex::new(r"u3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
+        static ref V3URE: Regex = Regex::new(r"u3[ ]*\([ ]*([^ ]+) ([^ ]+) ([^ ]+)[ ]*\)").unwrap();
         static ref V1URE: Regex = Regex::new(r"u[ ]*\([ ]*([^ ]+)[ ]*\)").unwrap();
         static ref spaceRE: Regex = Regex::new(r"[ ]+").unwrap();
         static ref garbageRE: Regex = Regex::new(r"^[ ]+|[ ]+$|[\t]+|;.*").unwrap();
@@ -2201,19 +2220,19 @@ mod tests {
                 ld r2.x, t0.x, r1.x
                 add.u32 r1.y, r1.x, u(128)
                 and r1.y, r1.y, u(0xfff)
-                ld r2.y, t0.x, r1.y
-                add.u32 r2.z, r2.x, r2.y
+                ld r6.w, t0.x, r1.y
+                add.u32 r2.z, r2.x, r6.w
                 st u0.x, r1.x, r2.z
                 ret
                 ",
         );
         let config = GPUConfig {
-            DRAM_latency: 20,
+            DRAM_latency: 30,
             DRAM_bandwidth: 256,
             L1_size: 1 << 14,
-            L1_latency: 4,
+            L1_latency: 10,
             L2_size: 1 << 15,
-            L2_latency: 10,
+            L2_latency: 20,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
             samplers_per_cu: 1,
@@ -2228,7 +2247,7 @@ mod tests {
             ALU_per_cu: 2,
             waves_per_cu: 16,
             fd_per_cu: 4,
-            ALU_pipe_len: 4,
+            ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
         let ITEMS = 1024;
