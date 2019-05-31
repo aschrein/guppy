@@ -739,7 +739,7 @@ impl GPUState {
                                 let mut reg = &mut wave.vgprfs[req.reg_row as usize]
                                     [(req.reg_col / 4) as usize];
                                 reg.val[(req.reg_col % 4) as usize] =
-                                    line.mem[(req.mem_offset - line.address) as usize];
+                                    line.mem[((req.mem_offset - line.address) / 4) as usize];
                                 // @REFINE: Unlock the register. Assuming there could be no other
                                 // pending requests for this register.
                                 reg.locked = false;
@@ -824,7 +824,7 @@ impl GPUState {
                 if new_timer == 0 {
                     ready_reqs.push((cu_id, mem_offset));
                 } else {
-                    new_cu_q.insert(cu_id, mem_offset);
+                    new_cu_q.insert(cu_id, new_timer);
                 }
             }
             new_req_queue.insert(mem_offset, new_cu_q);
@@ -887,7 +887,7 @@ impl GPUState {
                 mem: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             };
             for i in 0..16 {
-                line.mem[i] = self.mem[(mem_offset as usize + i) as usize];
+                line.mem[i] = self.mem[(mem_offset as usize / 4 + i) as usize];
             }
             self.l2_put_line(&line);
         }
@@ -1244,12 +1244,13 @@ fn clock(gpu_state: &mut GPUState) -> bool {
         }
         gpu_state.dreqs.append(&mut deferredReq);
     }
+    let mut gather_reqs: Vec<(u32, u32, Vec<LDReq>)> = Vec::new();
     let mut didSomeWork = false;
     // @Fetch-Submit part
     // @TODO: Refactor the loop - it looks ugly
     {
         // For each compute unit(they run in parallel in our imagination)
-        for cu in &mut gpu_state.cus {
+        for (cu_id, cu) in &mut gpu_state.cus.iter_mut().enumerate() {
             // Clear some flags
             for wave in &mut cu.waves {
                 wave.has_been_dispatched = false;
@@ -1368,27 +1369,22 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             wave.enabled = false;
                             continue;
                         } else if let InstTy::LD = inst.ty {
+                            let mut wave_gather_reqs: Vec<LDReq> = Vec::new();
                             let addr = wave.getValues(&inst.ops[2]);
                             if let Operand::VRegister(dst) = &inst.ops[0] {
-                                for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate()
-                                {
+                                for (i, item) in wave.vgprfs[dst.id as usize].iter().enumerate() {
                                     if wave.exec_mask[i] {
-                                        // item.locked = true;
                                         let mem_val = match &inst.ops[1] {
                                             Operand::RMemory(rm) => {
                                                 match &wave.r_views[rm.id as usize] {
                                                     View::BUFFER(buf) => {
-                                                        let mem_offset =
-                                                            (buf.offset + addr[i][0]) / 4;
+                                                        let mem_offset = buf.offset + addr[i][0];
                                                         applyReadSwizzle(
                                                             &[
-                                                                gpu_state.mem[mem_offset as usize],
-                                                                gpu_state.mem
-                                                                    [mem_offset as usize + 1],
-                                                                gpu_state.mem
-                                                                    [mem_offset as usize + 2],
-                                                                gpu_state.mem
-                                                                    [mem_offset as usize + 3],
+                                                                mem_offset,
+                                                                mem_offset + 4,
+                                                                mem_offset + 8,
+                                                                mem_offset + 12,
                                                             ],
                                                             &rm.comps,
                                                         )
@@ -1398,12 +1394,24 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                             }
                                             _ => std::panic!(""),
                                         };
-                                        applyWriteSwizzle(&mut item.val, &mem_val, &dst.comps);
+                                        let mut address: Value = [0, 0, 0, 0];
+                                        applyWriteSwizzle(&mut address, &mem_val, &dst.comps);
+                                        for (j, &comp) in address.iter().enumerate() {
+                                            if comp != 0 {
+                                                wave_gather_reqs.push(LDReq {
+                                                    reg_row: dst.id,
+                                                    reg_col: (i * 4 + j) as u32,
+                                                    mem_offset: comp,
+                                                    timer: gpu_state.config.L1_latency,
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             } else {
                                 std::panic!("")
                             }
+                            gather_reqs.push((cu_id as u32, wave_id as u32, wave_gather_reqs));
                             wave.pc += 1;
                             wave.has_been_dispatched = true;
                         } else if let InstTy::ST = inst.ty {
@@ -1419,14 +1427,16 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                                     View::BUFFER(buf) => {
                                                         let mem_offset =
                                                             (buf.offset + addr[i][0]) / 4;
-                                                        let mut val: Value = [
-                                                            gpu_state.mem[mem_offset as usize],
-                                                            gpu_state.mem[mem_offset as usize + 1],
-                                                            gpu_state.mem[mem_offset as usize + 2],
-                                                            gpu_state.mem[mem_offset as usize + 3],
-                                                        ];
+                                                        let mut val: Value = [0, 0, 0, 0];
                                                         applyWriteSwizzle(
-                                                            &mut val, &item.val, &rm.comps,
+                                                            &mut val,
+                                                            &[
+                                                                mem_offset,
+                                                                mem_offset + 1,
+                                                                mem_offset + 2,
+                                                                mem_offset + 3,
+                                                            ],
+                                                            &rm.comps,
                                                         );
                                                         (val, mem_offset)
                                                     }
@@ -1435,10 +1445,12 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                             }
                                             _ => std::panic!(""),
                                         };
-                                        gpu_state.mem[mem_offset as usize] = mem_val[0];
-                                        gpu_state.mem[mem_offset as usize + 1] = mem_val[1];
-                                        gpu_state.mem[mem_offset as usize + 2] = mem_val[2];
-                                        gpu_state.mem[mem_offset as usize + 3] = mem_val[3];
+                                        let regval = applyReadSwizzle(&item.val, &src.comps);
+                                        for i in 0..4 {
+                                            if mem_val[i] != 0 {
+                                                gpu_state.mem[mem_val[i] as usize] = regval[i];
+                                            }
+                                        }
                                     }
                                 }
                             } else {
@@ -1716,6 +1728,15 @@ fn clock(gpu_state: &mut GPUState) -> bool {
             for salu in &mut cu.salus {}
         }
     }
+    // Put memory requests
+    for (cu_id, wave_id, gather) in gather_reqs {
+        gpu_state.wave_gather(cu_id, wave_id, &gather);
+    }
+    for cu_id in 0..gpu_state.cus.len() {
+        gpu_state.l1_clock(cu_id as u32);
+    }
+    gpu_state.l2_clock();
+    gpu_state.mem_clock();
     gpu_state.clock_counter += 1;
     didSomeWork
 }
@@ -2142,9 +2163,13 @@ mod tests {
             r"
                 mov r1.x, thread_id
                 mul.u32 r1.x, r1.x, uvec1(4)
-                ld r2.xyzw, t0.xyzw, r1.x
-                add.u32 r2.x, r2.x, r2.w
+                ld r2.xy, t0.xw, r1.x
+                add.u32 r1.y, r1.x, uvec1(4)
+                ld r3.x, t0.x, r1.y
+                add.u32 r2.x, r2.x, r2.y
+                ;mov r2.x, r2.x
                 st u0.x, r1.x, r2.x
+
                 ret
                 ",
         );
@@ -2173,18 +2198,20 @@ mod tests {
         };
         let mut gpu_state = GPUState::new(&config);
         gpu_state.mem = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0,
+            0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, // padding
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, // read buffer
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // write buffer
         ];
         let program = Program { ins: res };
         dispatch(
             &mut gpu_state,
             &program,
             vec![View::BUFFER(Buffer {
-                offset: 0,
-                size: 16 * 4,
+                offset: 16,
+                size: 20 * 4,
             })],
             vec![View::BUFFER(Buffer {
-                offset: 0,
+                offset: 16 + 20 * 4,
                 size: 16 * 4,
             })],
             16,
@@ -2197,6 +2224,17 @@ mod tests {
                 .iter()
                 .map(|r| r.val[0])
                 .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0],
+            gpu_state.cus[0].waves[0].vgprfs[3]
+                .iter()
+                .map(|r| r.val[0])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 13, 14, 15],
+            gpu_state.mem[24..40]
         );
     }
 
