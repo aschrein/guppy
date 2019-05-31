@@ -84,6 +84,24 @@ fn LTU32(this: &Value, that: &Value) -> Value {
     ]
 }
 
+fn ORU32(this: &Value, that: &Value) -> Value {
+    [
+        this[0] | that[0],
+        this[1] | that[1],
+        this[2] | that[2],
+        this[3] | that[3],
+    ]
+}
+
+fn ANDU32(this: &Value, that: &Value) -> Value {
+    [
+        this[0] & that[0],
+        this[1] & that[1],
+        this[2] & that[2],
+        this[3] & that[3],
+    ]
+}
+
 fn AddF32(this_: &Value, that_: &Value) -> Value {
     let this = castToFValue(this_);
     let that = castToFValue(that_);
@@ -782,7 +800,7 @@ impl GPUState {
                     let mut reg =
                         &mut wave.vgprfs[req.reg_row as usize][(req.reg_col / 4) as usize];
                     reg.val[(req.reg_col % 4) as usize] =
-                        line.mem[(req.mem_offset - line.address) as usize];
+                        line.mem[((req.mem_offset - line.address) / 4) as usize];
                     // @REFINE: Unlock the register. Assuming there could be no other
                     // pending requests for this register.
                     reg.locked = false;
@@ -1069,6 +1087,8 @@ enum InstTy {
     SUB,
     MUL,
     DIV,
+    AND,
+    OR,
     NORM,
     SQRT,
     FSQRT,
@@ -1320,6 +1340,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             | InstTy::MUL
                             | InstTy::DIV
                             | InstTy::LT
+                            | InstTy::OR
+                            | InstTy::AND
                             | InstTy::ST
                             | InstTy::LD => {
                                 inst.assertThreeOp();
@@ -1584,20 +1606,11 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                     | InstTy::SUB
                                     | InstTy::MUL
                                     | InstTy::DIV
-                                    | InstTy::LT => {
-                                        if let Operand::VRegister(dst) = &inst.ops[0] {
-                                            for (i, item) in
-                                                wave.vgprfs[dst.id as usize].iter_mut().enumerate()
-                                            {
-                                                if wave.exec_mask[i] {
-                                                    item.locked = true;
-                                                }
-                                            }
-                                        } else {
-                                            std::panic!("")
-                                        }
-                                    }
-                                    InstTy::MOV | InstTy::UTOF => {
+                                    | InstTy::OR
+                                    | InstTy::AND
+                                    | InstTy::LT
+                                    | InstTy::MOV
+                                    | InstTy::UTOF => {
                                         if let Operand::VRegister(dst) = &inst.ops[0] {
                                             for (i, item) in
                                                 wave.vgprfs[dst.id as usize].iter_mut().enumerate()
@@ -1653,7 +1666,13 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                     let exec_mask = &dispInst.exec_mask.as_ref().unwrap();
                     let inst = dispInst.instr.unwrap();
                     match &inst.ty {
-                        InstTy::ADD | InstTy::SUB | InstTy::MUL | InstTy::DIV | InstTy::LT => {
+                        InstTy::ADD
+                        | InstTy::SUB
+                        | InstTy::MUL
+                        | InstTy::DIV
+                        | InstTy::LT
+                        | InstTy::OR
+                        | InstTy::AND => {
                             let src1 = dispInst.src[0].as_ref().unwrap();
                             let src2 = dispInst.src[1].as_ref().unwrap();
                             let dst = match &inst.ops[0] {
@@ -1680,6 +1699,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                             InstTy::MUL => MulU32(&x1, &x2),
                                             InstTy::DIV => DivU32(&x1, &x2),
                                             InstTy::LT => LTU32(&x1, &x2),
+                                            InstTy::OR => ORU32(&x1, &x2),
+                                            InstTy::AND => ANDU32(&x1, &x2),
                                             _ => std::panic!(""),
                                         },
 
@@ -1777,6 +1798,14 @@ fn parse(text: &str) -> Vec<Instruction> {
             _ => std::panic!(""),
         }
     };
+    let parseu32 = |s: &str| -> u32 {
+        let without_prefix = s.trim_start_matches("0x");
+        if without_prefix != s {
+            u32::from_str_radix(without_prefix, 16).unwrap()
+        } else {
+            without_prefix.parse::<u32>().unwrap()
+        }
+    };
     let parseOperand = |s: &str| -> Operand {
         if let Some(x) = VRegRE.captures(s) {
             return Operand::VRegister({
@@ -1852,31 +1881,29 @@ fn parse(text: &str) -> Vec<Instruction> {
         } else if let Some(x) = V4URE.captures(s) {
             return Operand::Immediate({
                 ImmediateVal::V4U(
-                    x.get(1).unwrap().as_str().parse::<u32>().unwrap(),
-                    x.get(2).unwrap().as_str().parse::<u32>().unwrap(),
-                    x.get(3).unwrap().as_str().parse::<u32>().unwrap(),
-                    x.get(4).unwrap().as_str().parse::<u32>().unwrap(),
+                    parseu32(x.get(1).unwrap().as_str()),
+                    parseu32(x.get(2).unwrap().as_str()),
+                    parseu32(x.get(3).unwrap().as_str()),
+                    parseu32(x.get(4).unwrap().as_str()),
                 )
             });
         } else if let Some(x) = V3URE.captures(s) {
             return Operand::Immediate({
                 ImmediateVal::V3U(
-                    x.get(1).unwrap().as_str().parse::<u32>().unwrap(),
-                    x.get(2).unwrap().as_str().parse::<u32>().unwrap(),
-                    x.get(4).unwrap().as_str().parse::<u32>().unwrap(),
+                    parseu32(x.get(1).unwrap().as_str()),
+                    parseu32(x.get(2).unwrap().as_str()),
+                    parseu32(x.get(3).unwrap().as_str()),
                 )
             });
         } else if let Some(x) = V2URE.captures(s) {
             return Operand::Immediate({
                 ImmediateVal::V2U(
-                    x.get(1).unwrap().as_str().parse::<u32>().unwrap(),
-                    x.get(2).unwrap().as_str().parse::<u32>().unwrap(),
+                    parseu32(x.get(1).unwrap().as_str()),
+                    parseu32(x.get(2).unwrap().as_str()),
                 )
             });
         } else if let Some(x) = V1URE.captures(s) {
-            return Operand::Immediate({
-                ImmediateVal::V1U(x.get(1).unwrap().as_str().parse::<u32>().unwrap())
-            });
+            return Operand::Immediate({ ImmediateVal::V1U(parseu32(x.get(1).unwrap().as_str())) });
         } else if let Some(x) = V4FRE.captures(s) {
             return Operand::Immediate({
                 ImmediateVal::V4F(
@@ -2039,7 +2066,7 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
                 }
             }
-            "add.u32" | "sub.u32" | "mul.u32" | "div.u32" | "lt.u32" => {
+            "add.u32" | "sub.u32" | "mul.u32" | "div.u32" | "lt.u32" | "and" | "or" => {
                 assert!(operands.len() == 3);
                 let dstRef = parseOperand(&operands[0]);
                 let src1Ref = parseOperand(&operands[1]);
@@ -2051,6 +2078,8 @@ fn parse(text: &str) -> Vec<Instruction> {
                         "mul.u32" => InstTy::MUL,
                         "div.u32" => InstTy::DIV,
                         "lt.u32" => InstTy::LT,
+                        "and" => InstTy::AND,
+                        "or" => InstTy::OR,
                         _ => std::panic!(""),
                     },
                     interp: Interpretation::U32,
@@ -2137,7 +2166,13 @@ fn main() {
 // also integer ops should be less expensive than the corresponding floating point ones
 fn getLatency(ty: &InstTy) -> u32 {
     match &ty {
-        InstTy::ADD | InstTy::SUB | InstTy::MOV | InstTy::UTOF | InstTy::LT => 1,
+        InstTy::ADD
+        | InstTy::SUB
+        | InstTy::MOV
+        | InstTy::UTOF
+        | InstTy::LT
+        | InstTy::AND
+        | InstTy::OR => 1,
         InstTy::MUL => 2,
         InstTy::DIV => 4,
         _ => panic!(""),
@@ -2156,6 +2191,81 @@ enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mem_test_2() {
+        let res = parse(
+            r"
+                mov r1.x, thread_id
+                mul.u32 r1.x, r1.x, uvec1(4)
+                ld r2.x, t0.x, r1.x
+                add.u32 r1.y, r1.x, uvec1(128)
+                and r1.y, r1.y, uvec1(0xfff)
+                ld r2.y, t0.x, r1.y
+                add.u32 r2.z, r2.x, r2.y
+                st u0.x, r1.x, r2.z
+                ret
+                ",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 20,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 4,
+            L2_size: 1 << 15,
+            L2_latency: 10,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 32,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 16,
+            fd_per_cu: 4,
+            ALU_pipe_len: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let ITEMS = 1024;
+        {
+            let mut mem: Vec<u32> = Vec::new();
+            mem.append(&mut vec![0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff]);
+            for i in 0..ITEMS {
+                mem.push(i);
+            }
+            for i in 0..ITEMS {
+                mem.push(0);
+            }
+            gpu_state.mem = mem;
+        }
+        let program = Program { ins: res };
+        dispatch(
+            &mut gpu_state,
+            &program,
+            vec![View::BUFFER(Buffer {
+                offset: 16,
+                size: ITEMS * 4,
+            })],
+            vec![View::BUFFER(Buffer {
+                offset: 16 + ITEMS * 4,
+                size: ITEMS * 4,
+            })],
+            128,
+            ITEMS / 128,
+        );
+        while clock(&mut gpu_state) {}
+        for i in 0..ITEMS {
+            assert_eq!(
+                gpu_state.mem[(4 + ITEMS + i) as usize],
+                i + ((i + 32) & (ITEMS - 1))
+            );
+        }
+    }
 
     #[test]
     fn mem_test() {
