@@ -704,6 +704,7 @@ impl GPUState {
                 }
                 // EOF Boilerplate
                 // Put the requests into the queue
+                // @ASSUME: requests are unique as long as registers are locked
                 l1.gather_queue
                     .get_mut(&page_offset)
                     .unwrap()
@@ -718,22 +719,22 @@ impl GPUState {
         }
     }
     fn l1_clock(&mut self, cu_id: u32) {
+        // Decrement timers and split the requests into un/ready lists
         let mut ready_reqs: Vec<(u32, u32, LDReq)> = Vec::new();
         let mut new_gather_queue: HashMap<u32, HashMap<u32, Vec<LDReq>>> = HashMap::new();
         {
-            let cu_state = &mut self.cus[cu_id as usize];
-            for (&mem_offset, reqq) in &mut cu_state.l1.gather_queue {
+            let cu_state = &self.cus[cu_id as usize];
+            for (&mem_offset, reqq) in &cu_state.l1.gather_queue {
                 let mut new_wave_q: HashMap<u32, Vec<LDReq>> = HashMap::new();
                 for (&wave_id, req) in reqq {
                     let mut new_reqs: Vec<LDReq> = Vec::new();
                     for ldreq in req {
-                        if ldreq.timer > 0 {
-                            ldreq.timer -= 1;
-                        }
-                        if ldreq.timer == 0 {
-                            ready_reqs.push((mem_offset, wave_id, ldreq.clone()));
+                        let mut new_ldreq = ldreq.clone();
+                        new_ldreq.timer = if ldreq.timer > 0 { ldreq.timer - 1 } else { 0 };
+                        if new_ldreq.timer == 0 {
+                            ready_reqs.push((mem_offset, wave_id, new_ldreq.clone()));
                         } else {
-                            new_reqs.push(ldreq.clone());
+                            new_reqs.push(new_ldreq);
                         }
                     }
                     new_wave_q.insert(wave_id, new_reqs);
@@ -741,6 +742,7 @@ impl GPUState {
                 new_gather_queue.insert(mem_offset, new_wave_q);
             }
         }
+        // Try to serve the requests
         for (mem_offset, wave_id, req) in ready_reqs {
             let mut served = false;
             // Try to find the page in the table
@@ -751,10 +753,10 @@ impl GPUState {
                         if let Some(line) = line {
                             if line.address == mem_offset {
                                 // Cache hit
-                                let mut wave = &mut cu_state.waves[wave_id as usize];
+                                let wave = &mut cu_state.waves[wave_id as usize];
                                 // @COPYPASTE
                                 assert!(req.mem_offset >= line.address);
-                                let mut reg = &mut wave.vgprfs[req.reg_row as usize]
+                                let reg = &mut wave.vgprfs[req.reg_row as usize]
                                     [(req.reg_col / 4) as usize];
                                 reg.val[(req.reg_col % 4) as usize] =
                                     line.mem[((req.mem_offset - line.address) / 4) as usize];
@@ -789,7 +791,7 @@ impl GPUState {
         if cu_state.l1.gather_queue.contains_key(&line.address) {
             // Serve the request
             for (&wave_id, requests) in cu_state.l1.gather_queue.get(&line.address).unwrap() {
-                let mut wave = &mut cu_state.waves[wave_id as usize];
+                let wave = &mut cu_state.waves[wave_id as usize];
                 for req in requests {
                     // Isn't done waiting yet
                     if req.timer != 0 {
@@ -797,8 +799,7 @@ impl GPUState {
                     }
                     // @COPYPASTE
                     assert!(req.mem_offset >= line.address);
-                    let mut reg =
-                        &mut wave.vgprfs[req.reg_row as usize][(req.reg_col / 4) as usize];
+                    let reg = &mut wave.vgprfs[req.reg_row as usize][(req.reg_col / 4) as usize];
                     reg.val[(req.reg_col % 4) as usize] =
                         line.mem[((req.mem_offset - line.address) / 4) as usize];
                     // @REFINE: Unlock the register. Assuming there could be no other
@@ -833,6 +834,7 @@ impl GPUState {
         }
     }
     fn l2_clock(&mut self) {
+        // As usual, decrement counters and split lists
         let mut ready_reqs: Vec<(u32, u32)> = Vec::new();
         let mut new_req_queue: HashMap<u32, HashMap<u32, u32>> = HashMap::new();
         for (&mem_offset, reqq) in &self.l2.req_queue {
@@ -845,8 +847,11 @@ impl GPUState {
                     new_cu_q.insert(cu_id, new_timer);
                 }
             }
-            new_req_queue.insert(mem_offset, new_cu_q);
+            if !new_cu_q.is_empty() {
+                new_req_queue.insert(mem_offset, new_cu_q);
+            }
         }
+        // Try to serve on ready requests
         for (cu_id, mem_offset) in ready_reqs {
             let mut hit_line: Option<CacheLine> = None;
             // Try to find the page in the table
@@ -860,13 +865,18 @@ impl GPUState {
                     }
                 }
             }
-            // Cache miss
+            // Cache hit
             if let Some(line) = hit_line {
                 self.l1_put_line(cu_id, &line);
-            } else {
+            }
+            // Cache miss
+            else {
                 // Emit the request to memory
                 self.loadMem(mem_offset, self.config.DRAM_latency);
                 // Put the request back to the queue
+                if !new_req_queue.contains_key(&mem_offset) {
+                    new_req_queue.insert(mem_offset, HashMap::new());
+                }
                 new_req_queue.get_mut(&mem_offset).unwrap().insert(cu_id, 0);
             }
         }
@@ -876,15 +886,13 @@ impl GPUState {
         // the line is in the cache so serve the requiests
         if self.l2.req_queue.contains_key(&line.address) {
             // Serve the request
-            for (&cu_id, &timer) in self.l2.req_queue.get(&line.address).unwrap() {
+            let reqs = self.l2.req_queue.remove_entry(&line.address).unwrap().1;
+            for (&cu_id, &timer) in &reqs {
                 if timer != 0 {
                     continue;
                 }
-                let cu = &mut self.cus[cu_id as usize];
-                cu.l1.cache_table.putLine(&line);
+                self.l1_put_line(cu_id, &line);
             }
-            // Remove the request
-            self.l2.req_queue.remove_entry(&line.address);
         }
         self.l2.cache_table.putLine(&line);
     }
@@ -899,7 +907,12 @@ impl GPUState {
                 new_req_queue.insert(mem_offset, new_timer);
             }
         }
+        let mut delivered = 0 as u32;
         for mem_offset in ready_reqs {
+            // Limit the bandwidth
+            if delivered >= self.config.DRAM_bandwidth {
+                new_req_queue.insert(mem_offset, 0);
+            }
             let mut line = CacheLine {
                 address: mem_offset,
                 mem: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -908,6 +921,7 @@ impl GPUState {
                 line.mem[i] = self.mem[(mem_offset as usize / 4 + i) as usize];
             }
             self.l2_put_line(&line);
+            delivered += 64;
         }
         self.ld_reqs = new_req_queue;
     }
@@ -1185,7 +1199,7 @@ struct DispatchReq {
     group_count: u32,
 }
 
-fn lower_bound<'a, K : std::cmp::Ord, V>(tree: &'a BTreeMap<K, V>, val: &K) -> (&'a K, &'a V){
+fn lower_bound<'a, K: std::cmp::Ord, V>(tree: &'a BTreeMap<K, V>, val: &K) -> (&'a K, &'a V) {
     use std::ops::Bound::*;
 
     let mut before = tree.range((Unbounded, Excluded(val)));
@@ -1215,20 +1229,18 @@ fn dispatch(
         for view in &rw_views {
             match view {
                 View::BUFFER(buf) => {
-                                        assert!(tree.insert(buf.offset, buf.size).is_none());
-
+                    assert!(tree.insert(buf.offset, buf.size).is_none());
                 }
                 _ => std::panic!(""),
             }
         }
-        let mut prev_back : Option<u32> = None;
+        let mut prev_back: Option<u32> = None;
         for (&offset, &size) in &tree {
             if let Some(prev_back) = prev_back {
                 assert!(prev_back <= offset);
             }
             prev_back = Some(offset + size);
         }
-        
     }
     let disp_req = DispatchReq {
         program: Rc::new(program.clone()),
@@ -1468,6 +1480,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                         applyWriteSwizzle(&mut address, &mem_val, &dst.comps);
                                         for (j, &comp) in address.iter().enumerate() {
                                             if comp != 0 {
+                                                // Align at dword
+                                                assert!(comp % 4 == 0);
                                                 wave_gather_reqs.push(LDReq {
                                                     reg_row: dst.id,
                                                     reg_col: (i * 4 + j) as u32,
@@ -1495,6 +1509,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                             Operand::RWMemory(rm) => {
                                                 match &wave.rw_views[rm.id as usize] {
                                                     View::BUFFER(buf) => {
+                                                        // Align at dword
+                                                        assert!(addr[i][0] % 4 == 0);
                                                         let mem_offset =
                                                             (buf.offset + addr[i][0]) / 4;
                                                         let mut val: Value = [0, 0, 0, 0];
@@ -2237,16 +2253,125 @@ fn getLatency(ty: &InstTy) -> u32 {
 
 enum Event {
     GROUP_DISPATCHED((u32, Vec<(u32, u32)>)),
+    // (cu_id, wave_id)
     WAVE_STALLED((u32, u32)),
+    // (cu_id, wave_id)
     WAVE_RETIRED((u32, u32)),
+    // (group)
     GROUP_RETIRED(u32),
-    INST_DISPATCHED((u32, u32)),
+    // (cu_id, wave_id, pc)
+    INST_DISPATCHED((u32, u32, u32)),
+    // (cu_id, wave_id, pc)
     INST_RETIRED((u32, u32)),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mem_test_3() {
+        let res = parse(
+            r"
+                mov r1.w, thread_id
+                mul.u32 r1.x, r1.w, u(12)
+                ld r2.x, t0.x, r1.x
+                add.u32 r1.y, r1.x, u(64)
+                and r1.y, r1.y, u(0xff)
+                ld r3.x, t0.x, r1.y
+                add.u32 r2.x, r2.x, r3.x
+                mul.u32 r1.x, r1.w, u(4)
+                st u0.x, r1.x, r2.x
+                ret
+                ",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 4,
+            DRAM_bandwidth: 64,
+            L1_size: 64,
+            L1_latency: 4,
+            L2_size: 64,
+            L2_latency: 4,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            samplers_per_cu: 1,
+            sampler_cache_latency: 100,
+            SLM_size: 1 << 14,
+            SLM_latency: 20,
+            SLM_banks: 32,
+            VGPRF_per_pe: 8,
+            SGPRF_per_wave: 16,
+            wave_size: 16,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 8,
+            fd_per_cu: 4,
+            ALU_pipe_len: 1,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        gpu_state.mem = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // padding
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, // read buffer
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, // read buffer
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, // read buffer
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, // read buffer
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // write buffer
+        ];
+        let program = Program { ins: res };
+        dispatch(
+            &mut gpu_state,
+            &program,
+            vec![View::BUFFER(Buffer {
+                offset: 64,
+                size: 64 * 4,
+            })],
+            vec![View::BUFFER(Buffer {
+                offset: 64 * 5,
+                size: 16 * 4,
+            })],
+            16,
+            1,
+        );
+        let mut history: Vec<String> = Vec::new();
+        while clock(&mut gpu_state) {
+            // "\"{:?}:<{:?}|{:?}|{:?}>\",",
+
+            let line = format!(
+                "{:?}:<{:?}|{:?}|{:?}>",
+                gpu_state.cus[0].waves[0].pc,
+                gpu_state.ld_reqs.len(),
+                gpu_state.l2.req_queue.len(),
+                gpu_state.cus[0].l1.gather_queue.len()
+            );
+            history.push(line);
+        }
+        assert_eq!(
+            history,
+            vec![
+                "1:<0|0|0>",
+                "2:<0|0|0>",
+                "2:<0|0|0>",
+                "3:<0|0|3>",
+                "4:<0|0|3>",
+                "5:<0|0|3>",
+                "6:<0|3|4>",
+                "6:<0|3|4>",
+                "6:<0|3|4>",
+                "6:<3|4|4>",
+                "6:<3|4|4>",
+                "6:<3|4|4>",
+                "6:<3|1|1>",
+                "6:<2|1|1>",
+                "6:<1|1|1>",
+                "6:<0|0|0>",
+                "7:<0|0|0>",
+                "8:<0|0|0>",
+                "8:<0|0|0>",
+                "9:<0|0|0>",
+                "9:<0|0|0>",
+            ]
+        );
+    }
 
     #[test]
     fn mem_test_2() {
@@ -2265,7 +2390,7 @@ mod tests {
         );
         let config = GPUConfig {
             DRAM_latency: 30,
-            DRAM_bandwidth: 256,
+            DRAM_bandwidth: 512,
             L1_size: 1 << 14,
             L1_latency: 10,
             L2_size: 1 << 15,
@@ -2314,7 +2439,15 @@ mod tests {
             128,
             ITEMS / 128,
         );
-        while clock(&mut gpu_state) {}
+        while clock(&mut gpu_state) {
+            // println!(
+            //     "{:?}:<{:?}|{:?}|{:?}>",
+            //     gpu_state.cus[0].waves[0].pc,
+            //     gpu_state.ld_reqs.len(),
+            //     gpu_state.l2.req_queue.len(),
+            //     gpu_state.cus[0].l1.gather_queue.len()
+            // );
+        }
         for i in 0..ITEMS {
             assert_eq!(
                 gpu_state.mem[(4 + ITEMS + i) as usize],
