@@ -1,15 +1,18 @@
-
 # TODOLIST
-* Write tests for RAW, WAW and WAR register hazards, check for antidependency
+* ~~Write tests for RAW, WAW and WAR register hazards, check for antidependency~~
 * Add ALU pipelining
     * chime variability?
 * Register bankning?
 * shuffle instructions
 * memory io instructions
-    * buffer/texture binding mechanism
-    * gather/scatter merging
-        * cache line collision resolution between L1s(false sharing/coalescing)
-    * cache system
+    * ~~read only raw buffers~~
+    * ~~write only raw buffers~~
+    * write only typed textures
+    * read only typed textures
+    * ~~buffer/texture binding mechanism~~
+    * ~~gather/scatter merging~~
+        * ~~cache line collision resolution between L1s(false sharing/coalescing)~~
+    * ~~cache system~~
         * banks
     * sampling system
     * atomic operations
@@ -18,6 +21,9 @@
     * fences
     * SLM
     * atomics
+* Refactor
+    * Memory subsystem
+        * Simplify cache communication
 ___
 # References
 Detailed overview of modern GPU architectures
@@ -67,3 +73,10 @@ Kaszyk, Kuba, et al.
 "Full-System Simulation of Mobile CPU/GPU Platforms." 2019
 ```
 ___
+Good blog post about performance implications of swizzle/tiling of textures
+```
+Fabian Giesen
+https://fgiesen.wordpress.com/2011/01/17/texture-tiling-and-swizzling/
+```
+___
+
