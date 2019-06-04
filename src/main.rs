@@ -834,7 +834,7 @@ impl GPUState {
         // 2) weights
         // 3) pages
         // 4) assemble the request
-        let mut texels: Vec<(f32, u32, u32, u32)> = Vec::new();
+        let mut texels: Vec<(f32, i32, i32, u32)> = Vec::new();
 
         let uv = match req.sampler.wrap_mode {
             WrapMode::WRAP => {
@@ -860,12 +860,19 @@ impl GPUState {
             }
             _ => std::panic!(""),
         };
+        let floor = |x: f32| {
+            if x < 0.0 {
+                (x - 1.0) as i32
+            } else {
+                x as i32
+            }
+        };
         // Transfrom texture space into texel space
         // (0.5, 0.5) - texture coordinate of the first texel
-        texels.push((0.0, (uv.0 - 0.5) as u32, (uv.1 - 0.5) as u32, 0));
-        texels.push((0.0, (uv.0 + 0.5) as u32, (uv.1 - 0.5) as u32, 0));
-        texels.push((0.0, (uv.0 + 0.5) as u32, (uv.1 + 0.5) as u32, 0));
-        texels.push((0.0, (uv.0 - 0.5) as u32, (uv.1 + 0.5) as u32, 0));
+        texels.push((0.0, floor(uv.0 - 0.5), floor(uv.1 - 0.5), 0));
+        texels.push((0.0, floor(uv.0 + 0.5), floor(uv.1 - 0.5), 0));
+        texels.push((0.0, floor(uv.0 + 0.5), floor(uv.1 + 0.5), 0));
+        texels.push((0.0, floor(uv.0 - 0.5), floor(uv.1 + 0.5), 0));
         // Figure out interpolation weights
         for tex in &mut texels {
             let tu = 1.0 - f32::abs(uv.0 - 0.5 - (tex.1 as f32));
@@ -878,7 +885,23 @@ impl GPUState {
         // Calculate needed pages
         for tex in &mut texels {
             let texel_coord = match req.sampler.wrap_mode {
-                WrapMode::WRAP => (tex.1 % req.texture.width, tex.2 % req.texture.height),
+                WrapMode::WRAP => {
+                    //tex.1 % req.texture.width, tex.2 % req.texture.height),
+                    let mut ntex = (tex.1, tex.2);
+                    while ntex.0 >= req.texture.width as i32 {
+                        ntex.0 -= req.texture.width as i32;
+                    }
+                    while ntex.0 < 0 {
+                        ntex.0 += req.texture.width as i32;
+                    }
+                    while ntex.1 >= req.texture.height as i32 {
+                        ntex.1 -= req.texture.height as i32;
+                    }
+                    while ntex.1 < 0 {
+                        ntex.1 += req.texture.height as i32;
+                    }
+                    (ntex.0 as u32, ntex.1 as u32)
+                }
                 _ => std::panic!(""),
             };
             let mem_offset = match req.texture.format {
@@ -1946,7 +1969,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 {
                                     if wave.exec_mask[i] {
                                         // item.locked = true;
-                                        let (mem_val, mem_offset) = match &inst.ops[0] {
+                                        let (mem_offsets, mem_vals) = match &inst.ops[0] {
                                             Operand::RWMemory(rm) => {
                                                 match &wave.rw_views[rm.id as usize] {
                                                     View::BUFFER(buf) => {
@@ -1975,43 +1998,44 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                                                 );
                                                             }
                                                         }
-                                                        (val, mem_offset)
+                                                        let regval =
+                                                            applyReadSwizzle(&item.val, &src.comps);
+                                                        (val, regval)
                                                     }
                                                     View::TEXTURE2D(tex) => {
                                                         let mem_offset =
                                                             (tex.offset + addr[i][0]) / 4;
-                                                        let mut val: Value = [0, 0, 0, 0];
-                                                        // applyWriteSwizzle(
-                                                        //     &mut val,
-                                                        //     &[
-                                                        //         mem_offset,
-                                                        //         mem_offset + 1,
-                                                        //         mem_offset + 2,
-                                                        //         mem_offset + 3,
-                                                        //     ],
-                                                        //     &rm.comps,
-                                                        // );
-                                                        // // Boundary checks
-                                                        // for i in 0..4 {
-                                                        //     if val[i] > 0 {
-                                                        //         assert!(
-                                                        //             val[i] * 4 >= buf.offset
-                                                        //                 && val[i] * 4
-                                                        //                     < buf.offset + buf.size
-                                                        //         );
-                                                        //     }
-                                                        // }
-                                                        (val, mem_offset)
+                                                        let mut mem_offsets: Value = [0, 0, 0, 0];
+                                                        let regval =
+                                                            applyReadSwizzle(&item.val, &src.comps);
+                                                        let mut mem_vals: Value = [0, 0, 0, 0];
+                                                        match tex.format {
+                                                            TextureFormat::RGBA8_UNORM => {
+                                                                mem_offsets[0] = (tex.offset
+                                                                    + tex.pitch * addr[i][1]
+                                                                    + addr[i][0] * 4)
+                                                                    / 4;
+                                                                mem_vals[0] = unsafe {
+                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[0]) * 255.0 ) as u32) << 24) |
+                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[1]) * 255.0 ) as u32) << 16) |
+                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[2]) * 255.0 ) as u32) << 8) |
+                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[3]) * 255.0 ) as u32) << 0)
+                                                                };
+                                                            }
+                                                            _ => std::panic!(""),
+                                                        };
+                                                        (mem_offsets, mem_vals)
                                                     }
                                                     _ => std::panic!(""),
                                                 }
                                             }
                                             _ => std::panic!(""),
                                         };
-                                        let regval = applyReadSwizzle(&item.val, &src.comps);
+
                                         for i in 0..4 {
-                                            if mem_val[i] != 0 {
-                                                gpu_state.mem[mem_val[i] as usize] = regval[i];
+                                            if mem_offsets[i] != 0 {
+                                                gpu_state.mem[mem_offsets[i] as usize] =
+                                                    mem_vals[i];
                                             }
                                         }
                                     }
@@ -2760,93 +2784,141 @@ mod tests {
     fn mem_test_texture() {
         let res = parse(
             r"
-                ; assume group size of 1024
                 mov r0.xy, thread_id
-                and r0.x, r0.x, u(0x1f) ; 0b11111
-                div.u32 r0.y, r0.y, u(32)
+                and r0.x, r0.x, u(63)
+                div.u32 r0.y, r0.y, u(64)
                 mov r0.zw, r0.xy
                 utof r0.xy, r0.xy
                 ; add 0.5 to fit the center of the texel
-                add.f32 r0.xy, r0.xy, f2(0.7 0.5)
-                ; r0.xy now is (0.0 .. 31.5, 0.0 .. 31.5)
-                div.f32 r0.xy, r0.xy, f2(32.0 32.0)
-                ; r0.xy now is (0.0 .. 1.0, 0.0 .. 1.0)
+                add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+                ; normalize coordinates
+                div.f32 r0.xy, r0.xy, f2(64.0 64.0)
+                ; tx * 2.0 - 1.0
+                mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
+                sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
+                ; rotate with pi/4
+                mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)
+                add.f32 r5.x, r4.x, r4.y
+                sub.f32 r5.y, r4.y, r4.x
+                mov r0.xy, r5.xy
                 ; texture fetch
                 ; coordinates are normalized
                 ; type conversion and coordinate conversion happens here
                 sample r1.xyzw, t0.xyzw, s0, r0.xy
                 ; coordinates are u32 here(in texels)
                 ; type conversion needs to happen
-                st u0.xyzw, r0.zw, r1.xy
+                st u0.xyzw, r0.zw, r1.xyzw
                 ret
                 ",
         );
         let config = GPUConfig {
             DRAM_latency: 4,
-            DRAM_bandwidth: 64,
-            L1_size: 64,
+            DRAM_bandwidth: 64 * 32,
+            L1_size: 1 << 10,
             L1_latency: 4,
-            L2_size: 64,
+            L2_size: 1 << 14,
             L2_latency: 4,
             sampler_cache_size: 1 << 10,
             sampler_latency: 4,
-            sampler_cache_latency: 100,
+            sampler_cache_latency: 10,
             SLM_size: 1 << 14,
             SLM_latency: 20,
             SLM_banks: 32,
             VGPRF_per_pe: 8,
             SGPRF_per_wave: 16,
-            wave_size: 8,
-            CU_count: 1024,
-            ALU_per_cu: 2,
+            wave_size: 32,
+            CU_count: 8,
+            ALU_per_cu: 4,
             waves_per_cu: 8,
             fd_per_cu: 4,
             ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
         let w = 0xffffffff as u32;
-        let TEXTURE_SIZE = 32;
+        let TEXTURE_SIZE = 8;
+        let AMP_K = 8;
         {
             let mut mem: Vec<u32> = Vec::new();
             for i in 0..16 {
                 mem.push(0);
             }
-            for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE * 2) {
+            for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE) {
+                if i % (TEXTURE_SIZE / 4) == 0 
+                || i % (TEXTURE_SIZE * 4) < TEXTURE_SIZE {
+                    mem.push(((i * TEXTURE_SIZE) << 16) | 0xff);
+                } else {
+                    mem.push(((i * TEXTURE_SIZE) << 8) | 0xff);
+                }
+            }
+            for i in 0..(AMP_K * AMP_K * TEXTURE_SIZE * TEXTURE_SIZE) {
                 mem.push(0);
             }
-            mem[16] = 0xffffff00;
-            mem[17] = 0xff000000;
+            mem[16] = 0xffffffff;
+            mem[17] = 0xff0000ff;
             gpu_state.mem = mem;
         }
         let program = Program { ins: res };
+        let out_view = Texture2D {
+            offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 4,
+            pitch: AMP_K * TEXTURE_SIZE * 4,
+            width: AMP_K * TEXTURE_SIZE,
+            height: AMP_K * TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
+        let in_view = Texture2D {
+            offset: 64,
+            pitch: TEXTURE_SIZE * 4,
+            width: TEXTURE_SIZE,
+            height: TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
         dispatch(
             &mut gpu_state,
             &program,
-            vec![View::TEXTURE2D(Texture2D {
-                offset: 64,
-                pitch: TEXTURE_SIZE * 4,
-                width: TEXTURE_SIZE,
-                height: TEXTURE_SIZE,
-                format: TextureFormat::RGBA8_UNORM,
-            })],
-            vec![View::TEXTURE2D(Texture2D {
-                offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 4,
-                pitch: TEXTURE_SIZE * 4,
-                width: TEXTURE_SIZE,
-                height: TEXTURE_SIZE,
-                format: TextureFormat::RGBA8_UNORM,
-            })],
+            vec![View::TEXTURE2D(in_view.clone())],
+            vec![View::TEXTURE2D(out_view.clone())],
             vec![Sampler {
                 wrap_mode: WrapMode::WRAP,
                 sample_mode: SampleMode::BILINEAR,
             }],
-            8,
-            1,
+            32,
+            (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
         while clock(&mut gpu_state) {
             let wave = &gpu_state.cus[0].waves[0];
             //println!("{:?}", wave.program.as_ref().unwrap().ins[wave.pc as usize]);
         }
+        let save_image = |view: &Texture2D, name: &str| {
+            extern crate image;
+            use image::{GenericImage, GenericImageView, ImageBuffer, RgbImage};
+            let mut img: RgbImage = ImageBuffer::new(view.width, view.height);
+
+            for i in 0..view.height {
+                for j in 0..view.width {
+                    let raw_val =
+                        gpu_state.mem[(view.offset / 4 + view.pitch / 4 * i + j) as usize];
+                    let comps = [
+                        (raw_val >> 24) & 0xff,
+                        (raw_val >> 16) & 0xff,
+                        (raw_val >> 8) & 0xff,
+                        (raw_val >> 0) & 0xff,
+                    ];
+                    img.put_pixel(
+                        j,
+                        i,
+                        image::Pixel::from_channels(
+                            comps[0] as u8,
+                            comps[1] as u8,
+                            comps[2] as u8,
+                            comps[3] as u8,
+                        ),
+                    );
+                }
+            }
+            img.save(name).unwrap();
+        };
+        save_image(&in_view, "in.png");
+        save_image(&out_view, "out.png");
         println!(
             "{:?}",
             gpu_state.cus[0].waves[0].vgprfs[0]
