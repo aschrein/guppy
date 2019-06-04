@@ -1,3 +1,43 @@
+# Toy GPU emulator
+* Approximates clock cycle cost of instructions
+    * ALU latency
+    * Sampler/L1/L2/memory latency
+* Branching
+    * Implemented with mask stack
+* Loops
+    * When all lanes become inactive a mask is popped from the stack
+* Architecture inspired by AMD gpu
+```
+DRAM -> L2 -+
+            |_ (Sampler, L1) - CU scheduler - (wavefront_1..wavefront_N)
+            |_ ...
+            *
+            *
+            |_ ...
+```
+___
+## Example
+```assembly
+; assume group size of 1024
+mov r0.xy, thread_id
+and r0.x, r0.x, u(0x1f) ; 0b11111
+div.u32 r0.y, r0.y, u(32)
+mov r0.zw, r0.xy
+utof r0.xy, r0.xy
+; add 0.5 to fit the center of the texel
+add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+; r0.xy now is (0.0 .. 31.5, 0.0 .. 31.5)
+div.f32 r0.xy, r0.xy, f2(32.0 32.0)
+; r0.xy now is (0.0 .. 1.0, 0.0 .. 1.0)
+; texture fetch
+; coordinates are normalized
+; type conversion and coordinate conversion happens here
+sample r1.xyzw, t0.xyzw, s0, r0.xy
+; coordinates are u32 here(in texels)
+; type conversion needs to happen
+st u0.xyzw, r0.zw, r1.xy
+ret
+```
 # TODOLIST
 * ~~Write tests for RAW, WAW and WAR register hazards, check for antidependency~~
 * Add ALU pipelining
