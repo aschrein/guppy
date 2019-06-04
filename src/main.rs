@@ -2800,6 +2800,7 @@ mod tests {
                 mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)
                 add.f32 r5.x, r4.x, r4.y
                 sub.f32 r5.y, r4.y, r4.x
+                ;mul.f32 r5.x, r5.x, f(2.0)
                 mov r0.xy, r5.xy
                 ; texture fetch
                 ; coordinates are normalized

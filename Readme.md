@@ -51,6 +51,33 @@ LOOP_BEGIN:
     jmp LOOP_PROLOG
 LOOP_END:
     ret
+```
+```assembly
+mov r0.xy, thread_id
+and r0.x, r0.x, u(63)
+div.u32 r0.y, r0.y, u(64)
+mov r0.zw, r0.xy
+utof r0.xy, r0.xy
+; add 0.5 to fit the center of the texel
+add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+; normalize coordinates
+div.f32 r0.xy, r0.xy, f2(64.0 64.0)
+; tx * 2.0 - 1.0
+mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
+sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
+; rotate with pi/4
+mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)
+add.f32 r5.x, r4.x, r4.y
+sub.f32 r5.y, r4.y, r4.x
+;mul.f32 r5.x, r5.x, f(2.0)
+mov r0.xy, r5.xy
+; texture fetch
+; coordinates are normalized
+; type conversion and coordinate conversion happens here
+sample r1.xyzw, t0.xyzw, s0, r0.xy
+; coordinates are u32 here(in texels)
+; type conversion needs to happen
+st u0.xyzw, r0.zw, r1.xyzw
 ret
 ```
 # TODOLIST
