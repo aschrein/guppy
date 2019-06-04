@@ -7,6 +7,15 @@
 * Loops
     * When all lanes become inactive a mask is popped from the stack
 * Architecture inspired by AMD gpu
+* Dynamic instruction scheduling
+    * WAW, RAW, WAR Hazards are resolved via stalls
+    * Stalls happen when a locked register is used, or at the end of wave execution
+* DirectX/PTX like assembly syntax
+    * Registers have 4 components accessed with swizzle suffix e.g. r0.xyzw
+    * Up to 256 registers per lane
+    * Register components share lock flag e.g. locking r1.x means r1.y is locked
+    * Typed instrucions have type suffix e.g. mul.f32, mul.u32
+    * Manual type conversion
 ```
 DRAM -> L2 -+
             |_ (Sampler, L1) - CU scheduler - (wavefront_1..wavefront_N)

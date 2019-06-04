@@ -494,6 +494,7 @@ struct SampleReq {
     wave_id: u32,
     reg_row: u32,
     reg_col: u32,
+    comp: u32,
     u: f32,
     v: f32,
     texture: Texture2D,
@@ -503,9 +504,9 @@ struct SampleReq {
 #[derive(Clone, Debug)]
 struct SampleReqWrap {
     req: SampleReq,
-    // queue for (mem_offset, value)[4]
+    // buffer for (mem_offset, value)[4]
     // (-1, -1) (1, -1) (1 1) (-1 1)
-    values: [(u32, f32, Option<f32>); 4],
+    values: [(u32, f32, Option<u32>); 4],
     timer: u32,
 }
 
@@ -746,12 +747,93 @@ impl GPUState {
         }
         None
     }
+    fn serve_sample(&mut self, cu_id: u32, req_id: u32, req: &SampleReqWrap) {
+        self.cus[cu_id as usize]
+            .sampler
+            .reqs
+            .remove(&req_id)
+            .unwrap();
+
+        let mut final_val = 0.0;
+        for i in 0..4 {
+            let val: f32 = match req.req.texture.format {
+                TextureFormat::RGBA8_UNORM => {
+                    ((req.values[i].2.unwrap() >> ((3 - req.req.comp) * 8)) & 0xff) as f32 / 255.0
+                }
+                _ => std::panic!(""),
+            };
+            final_val += val * req.values[i].1;
+        }
+        let reg = &mut self.cus[cu_id as usize].waves[req.req.wave_id as usize].vgprfs
+            [req.req.reg_row as usize][(req.req.reg_col / 4) as usize];
+        reg.locked = false;
+        reg.val[(req.req.reg_col % 4) as usize] =
+            unsafe { std::mem::transmute_copy::<f32, u32>(&final_val) };
+        //[(req.req.reg_col % 4) as usize] = 0
+    }
+    fn sampler_put_line(&mut self, cu_id: u32, line: &CacheLine) {
+        // the line is in the cache so serve the requiests
+        if self.cus[cu_id as usize]
+            .sampler
+            .gather_queue
+            .contains_key(&line.address)
+        {
+            let requests = self.cus[cu_id as usize]
+                .sampler
+                .gather_queue
+                .get(&line.address)
+                .unwrap()
+                .clone();
+            let mut unserved: HashSet<u32> = HashSet::new();
+            // Serve the request
+            for &requests_id in &requests {
+                let mut req = self.cus[cu_id as usize]
+                    .sampler
+                    .reqs
+                    .get(&requests_id)
+                    .unwrap()
+                    .clone();
+                // Request isnt ready yet
+                if req.timer != 0 {
+                    unserved.insert(requests_id);
+                    continue;
+                }
+                for val in &mut req.values {
+                    if val.0 > line.address && (val.0 - line.address) < 64 {
+                        // let comp: f32 = unsafe {
+                        //     std::mem::transmute_copy(
+                        //         &line.mem[((val.0 - line.address) / 4) as usize],
+                        //     )
+                        // };
+                        val.2 = Some(line.mem[((val.0 - line.address) / 4) as usize]);
+                    }
+                }
+                let complete = req.values.iter().all(|x| x.2.is_some());
+                // The request is ready
+                if complete {
+                    self.serve_sample(cu_id, requests_id, &req);
+                }
+            }
+            // Remove the request
+            if unserved.len() == 0 {
+                self.cus[cu_id as usize]
+                    .sampler
+                    .gather_queue
+                    .remove_entry(&line.address);
+            } else {
+                self.cus[cu_id as usize]
+                    .sampler
+                    .gather_queue
+                    .insert(line.address, unserved);
+            }
+        }
+        self.cus[cu_id as usize].sampler.cache_table.putLine(&line);
+    }
     fn sample(&mut self, req: &SampleReq) {
         // 1) required texels for bilinear interpl
         // 2) weights
         // 3) pages
         // 4) assemble the request
-        let page_size = 64 as u32;
         let mut texels: Vec<(f32, u32, u32, u32)> = Vec::new();
 
         let uv = match req.sampler.wrap_mode {
@@ -778,25 +860,35 @@ impl GPUState {
             }
             _ => std::panic!(""),
         };
-        texels.push((0.0, (uv.0 - 0.0) as u32, (uv.1 - 0.0) as u32, 0));
-        texels.push((0.0, (uv.0 + 1.0) as u32, (uv.1 - 0.0) as u32, 0));
-        texels.push((0.0, (uv.0 + 1.0) as u32, (uv.1 + 1.0) as u32, 0));
-        texels.push((0.0, (uv.0 - 0.0) as u32, (uv.1 + 1.0) as u32, 0));
+        // Transfrom texture space into texel space
+        // (0.5, 0.5) - texture coordinate of the first texel
+        texels.push((0.0, (uv.0 - 0.5) as u32, (uv.1 - 0.5) as u32, 0));
+        texels.push((0.0, (uv.0 + 0.5) as u32, (uv.1 - 0.5) as u32, 0));
+        texels.push((0.0, (uv.0 + 0.5) as u32, (uv.1 + 0.5) as u32, 0));
+        texels.push((0.0, (uv.0 - 0.5) as u32, (uv.1 + 0.5) as u32, 0));
+        // Figure out interpolation weights
         for tex in &mut texels {
-            let tu = 1.0 - f32::abs(uv.0 - (tex.1 as f32));
-            let tv = 1.0 - f32::abs(uv.1 - (tex.2 as f32));
+            let tu = 1.0 - f32::abs(uv.0 - 0.5 - (tex.1 as f32));
+            let tv = 1.0 - f32::abs(uv.1 - 0.5 - (tex.2 as f32));
             let weight = tu * tv;
             tex.0 = weight;
         }
+        // Allocate the request id
         let req_id = self.cus[req.cu_id as usize].sampler.alloc_id();
+        // Calculate needed pages
         for tex in &mut texels {
             let texel_coord = match req.sampler.wrap_mode {
                 WrapMode::WRAP => (tex.1 % req.texture.width, tex.2 % req.texture.height),
                 _ => std::panic!(""),
             };
-            let mem_offset = req.texture.pitch * texel_coord.1 + texel_coord.0;
+            let mem_offset = match req.texture.format {
+                TextureFormat::RGBA8_UNORM => {
+                    req.texture.offset + req.texture.pitch * texel_coord.1 + texel_coord.0 * 4 // 4 bytes per pixel
+                }
+                _ => std::panic!(""),
+            };
             tex.3 = mem_offset;
-            let page_offset = mem_offset & !(63);
+            let page_offset = mem_offset & !63;
             if !self.cus[req.cu_id as usize]
                 .sampler
                 .gather_queue
@@ -845,39 +937,52 @@ impl GPUState {
         // Try to serve ready requests
         for (&req_id, req) in &mut ready_reqs {
             let mut missed_pages: HashSet<u32> = HashSet::new();
-            // Each value 
+            // Each value
             for i in 0..4 {
                 let val = req.values[i].clone();
-                let page_offset = val.0 & 63;
+                if val.2.is_some() {
+                    continue;
+                }
+                let page_offset = val.0 & !63;
                 if let Some(line) = self.cus[cu_id as usize]
                     .sampler
                     .cache_table
                     .getLine(page_offset)
                 {
                     // Cache hit
-                    let comp: f32 = unsafe {
-                        std::mem::transmute_copy(&line.mem[((val.0 - page_offset) / 4) as usize])
-                    };
-                    req.values[i].2 = Some(comp);
-                    self.cus[cu_id as usize]
+                    // let comp: f32 = unsafe {
+                    //     std::mem::transmute_copy(&line.mem[((val.0 - page_offset) / 4) as usize])
+                    // };
+                    req.values[i].2 = Some(line.mem[((val.0 - page_offset) / 4) as usize]);
+                    if self.cus[cu_id as usize]
                         .sampler
                         .gather_queue
-                        .get_mut(&page_offset)
-                        .unwrap()
-                        .remove(&req_id);
+                        .contains_key(&page_offset)
+                    {
+                        self.cus[cu_id as usize]
+                            .sampler
+                            .gather_queue
+                            .get_mut(&page_offset)
+                            .unwrap()
+                            .remove(&req_id);
+                    }
                 } else {
                     missed_pages.insert(page_offset);
                 }
             }
-            let complete = !req.values.iter().any(|x| x.2.is_none());
+            let complete = req.values.iter().all(|x| x.2.is_some());
             if complete {
-                self.serve_sample(cu_id, req_id);
+                self.serve_sample(cu_id, req_id, &req);
             }
             // Handle cache miss
             if missed_pages.len() != 0 {
+                // Put the request back to the queue
                 new_reqs.insert(req_id, req.clone());
+                // For each missed page
                 for page in missed_pages {
+                    // Request the page from l2
                     self.l2_request_page(cu_id, page, false);
+                    // Register the page in the request table
                     let queue = &mut self.cus[cu_id as usize].sampler.gather_queue;
                     if !queue.contains_key(&page) {
                         queue.insert(page, HashSet::new());
@@ -886,6 +991,7 @@ impl GPUState {
                 }
             }
         }
+        self.cus[cu_id as usize].sampler.reqs = new_reqs;
     }
     fn loadMem(&mut self, page_offset: u32, timeout: u32) {
         let page_size = 64 as u32;
@@ -1046,70 +1152,6 @@ impl GPUState {
             }
         }
         cu_state.l1.cache_table.putLine(&line);
-    }
-    fn serve_sample(&mut self, cu_id: u32, req_id: u32) {
-        let req = self.cus[cu_id as usize]
-            .sampler
-            .reqs
-            .remove(&req_id)
-            .unwrap();
-    }
-    fn sampler_put_line(&mut self, cu_id: u32, line: &CacheLine) {
-        // the line is in the cache so serve the requiests
-        if self.cus[cu_id as usize]
-            .sampler
-            .gather_queue
-            .contains_key(&line.address)
-        {
-            let requests = self.cus[cu_id as usize]
-                .sampler
-                .gather_queue
-                .get(&line.address)
-                .unwrap()
-                .clone();
-            let mut unserved: HashSet<u32> = HashSet::new();
-            // Serve the request
-            for &requests_id in &requests {
-                let mut req = self.cus[cu_id as usize]
-                    .sampler
-                    .reqs
-                    .get(&requests_id)
-                    .unwrap()
-                    .clone();
-
-                if req.timer != 0 {
-                    unserved.insert(requests_id);
-                    continue;
-                }
-                for val in &mut req.values {
-                    if val.0 > line.address && (val.0 - line.address) < 64 {
-                        let comp: f32 = unsafe {
-                            std::mem::transmute_copy(
-                                &line.mem[((val.0 - line.address) / 4) as usize],
-                            )
-                        };
-                        val.2 = Some(comp);
-                    }
-                }
-                let complete = !req.values.iter().any(|x| x.2.is_none());
-                if complete {
-                    self.serve_sample(cu_id, requests_id);
-                }
-            }
-            // Remove the request
-            if unserved.len() == 0 {
-                self.cus[cu_id as usize]
-                    .sampler
-                    .gather_queue
-                    .remove_entry(&line.address);
-            } else {
-                self.cus[cu_id as usize]
-                    .sampler
-                    .gather_queue
-                    .insert(line.address, unserved);
-            }
-        }
-        self.cus[cu_id as usize].sampler.cache_table.putLine(&line);
     }
 
     fn l2_request_page(&mut self, cu_id: u32, page_offset: u32, l1_target: bool) {
@@ -1881,6 +1923,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                                 wave_id: wave_id as u32,
                                                 reg_row: dst.id,
                                                 reg_col: i as u32 * 4 + reg_cols[j] - 1,
+                                                comp: j as u32,
                                                 u: addresses[i][0],
                                                 v: addresses[i][1],
                                                 texture: texture.clone(),
@@ -2256,6 +2299,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
     }
     for cu_id in 0..gpu_state.cus.len() {
         gpu_state.l1_clock(cu_id as u32);
+        gpu_state.sampler_clock(cu_id as u32);
     }
     gpu_state.l2_clock();
     gpu_state.mem_clock();
@@ -2722,7 +2766,8 @@ mod tests {
                 div.u32 r0.y, r0.y, u(32)
                 mov r0.zw, r0.xy
                 utof r0.xy, r0.xy
-                add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+                ; add 0.5 to fit the center of the texel
+                add.f32 r0.xy, r0.xy, f2(0.7 0.5)
                 ; r0.xy now is (0.0 .. 31.5, 0.0 .. 31.5)
                 div.f32 r0.xy, r0.xy, f2(32.0 32.0)
                 ; r0.xy now is (0.0 .. 1.0, 0.0 .. 1.0)
@@ -2744,15 +2789,15 @@ mod tests {
             L2_size: 64,
             L2_latency: 4,
             sampler_cache_size: 1 << 10,
-            sampler_latency: 100,
+            sampler_latency: 4,
             sampler_cache_latency: 100,
             SLM_size: 1 << 14,
             SLM_latency: 20,
             SLM_banks: 32,
             VGPRF_per_pe: 8,
             SGPRF_per_wave: 16,
-            wave_size: 32,
-            CU_count: 2,
+            wave_size: 8,
+            CU_count: 1024,
             ALU_per_cu: 2,
             waves_per_cu: 8,
             fd_per_cu: 4,
@@ -2769,6 +2814,8 @@ mod tests {
             for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE * 2) {
                 mem.push(0);
             }
+            mem[16] = 0xffffff00;
+            mem[17] = 0xff000000;
             gpu_state.mem = mem;
         }
         let program = Program { ins: res };
@@ -2793,13 +2840,27 @@ mod tests {
                 wrap_mode: WrapMode::WRAP,
                 sample_mode: SampleMode::BILINEAR,
             }],
-            32,
-            TEXTURE_SIZE * TEXTURE_SIZE / 32,
+            8,
+            1,
         );
         while clock(&mut gpu_state) {
             let wave = &gpu_state.cus[0].waves[0];
-            println!("{:?}", wave.program.as_ref().unwrap().ins[wave.pc as usize]);
+            //println!("{:?}", wave.program.as_ref().unwrap().ins[wave.pc as usize]);
         }
+        println!(
+            "{:?}",
+            gpu_state.cus[0].waves[0].vgprfs[0]
+                .iter()
+                .map(|r| castToFValue(&r.val))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "{:?}",
+            gpu_state.cus[0].waves[0].vgprfs[1]
+                .iter()
+                .map(|r| castToFValue(&r.val))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
