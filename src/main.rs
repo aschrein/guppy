@@ -2776,6 +2776,35 @@ enum Event {
     INST_RETIRED((u32, u32)),
 }
 
+fn save_image(gpu_state: &GPUState, view: &Texture2D, name: &str) {
+    extern crate image;
+    use image::{GenericImage, GenericImageView, ImageBuffer, RgbImage};
+    let mut img: RgbImage = ImageBuffer::new(view.width, view.height);
+
+    for i in 0..view.height {
+        for j in 0..view.width {
+            let raw_val = gpu_state.mem[(view.offset / 4 + view.pitch / 4 * i + j) as usize];
+            let comps = [
+                (raw_val >> 24) & 0xff,
+                (raw_val >> 16) & 0xff,
+                (raw_val >> 8) & 0xff,
+                (raw_val >> 0) & 0xff,
+            ];
+            img.put_pixel(
+                j,
+                i,
+                image::Pixel::from_channels(
+                    comps[0] as u8,
+                    comps[1] as u8,
+                    comps[2] as u8,
+                    comps[3] as u8,
+                ),
+            );
+        }
+    }
+    img.save(name).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2844,8 +2873,7 @@ mod tests {
                 mem.push(0);
             }
             for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE) {
-                if i % (TEXTURE_SIZE / 4) == 0 
-                || i % (TEXTURE_SIZE * 4) < TEXTURE_SIZE {
+                if i % (TEXTURE_SIZE / 4) == 0 || i % (TEXTURE_SIZE * 4) < TEXTURE_SIZE {
                     mem.push(((i * TEXTURE_SIZE) << 16) | 0xff);
                 } else {
                     mem.push(((i * TEXTURE_SIZE) << 8) | 0xff);
@@ -2889,51 +2917,107 @@ mod tests {
             let wave = &gpu_state.cus[0].waves[0];
             //println!("{:?}", wave.program.as_ref().unwrap().ins[wave.pc as usize]);
         }
-        let save_image = |view: &Texture2D, name: &str| {
-            extern crate image;
-            use image::{GenericImage, GenericImageView, ImageBuffer, RgbImage};
-            let mut img: RgbImage = ImageBuffer::new(view.width, view.height);
 
-            for i in 0..view.height {
-                for j in 0..view.width {
-                    let raw_val =
-                        gpu_state.mem[(view.offset / 4 + view.pitch / 4 * i + j) as usize];
-                    let comps = [
-                        (raw_val >> 24) & 0xff,
-                        (raw_val >> 16) & 0xff,
-                        (raw_val >> 8) & 0xff,
-                        (raw_val >> 0) & 0xff,
-                    ];
-                    img.put_pixel(
-                        j,
-                        i,
-                        image::Pixel::from_channels(
-                            comps[0] as u8,
-                            comps[1] as u8,
-                            comps[2] as u8,
-                            comps[3] as u8,
-                        ),
-                    );
-                }
+        // save_image(&gpu_state, &in_view, "in.png");
+        // save_image(&gpu_state, &out_view, "out.png");
+        let line = {
+            let mut vec: Vec<Value> = Vec::new();
+            for j in 0..out_view.width {
+                let raw_val =
+                    gpu_state.mem[(out_view.offset / 4 + out_view.pitch / 4 * 32 + j) as usize];
+                vec.push([
+                    (raw_val >> 24) & 0xff,
+                    (raw_val >> 16) & 0xff,
+                    (raw_val >> 8) & 0xff,
+                    (raw_val >> 0) & 0xff,
+                ]);
             }
-            img.save(name).unwrap();
+            vec
         };
-        save_image(&in_view, "in.png");
-        save_image(&out_view, "out.png");
-        println!(
-            "{:?}",
-            gpu_state.cus[0].waves[0].vgprfs[0]
-                .iter()
-                .map(|r| castToFValue(&r.val))
-                .collect::<Vec<_>>()
+        assert_eq!(
+            line,
+            vec![
+                [0, 88, 1, 255],
+                [0, 63, 16, 255],
+                [0, 44, 26, 255],
+                [0, 30, 30, 255],
+                [0, 22, 28, 255],
+                [0, 19, 21, 255],
+                [0, 23, 7, 255],
+                [0, 28, 12, 255],
+                [0, 45, 31, 255],
+                [0, 75, 36, 255],
+                [0, 119, 28, 255],
+                [0, 176, 6, 254],
+                [0, 186, 31, 255],
+                [0, 146, 70, 255],
+                [0, 102, 104, 255],
+                [0, 63, 134, 255],
+                [0, 27, 160, 255],
+                [0, 4, 173, 255],
+                [0, 35, 132, 255],
+                [0, 61, 96, 255],
+                [0, 84, 63, 255],
+                [0, 102, 35, 255],
+                [0, 117, 11, 255],
+                [0, 107, 10, 255],
+                [0, 79, 28, 255],
+                [0, 59, 38, 255],
+                [0, 47, 41, 254],
+                [0, 42, 36, 255],
+                [0, 44, 24, 255],
+                [36, 82, 39, 255],
+                [70, 111, 94, 255],
+                [86, 136, 126, 255],
+                [86, 160, 126, 255],
+                [70, 184, 94, 255],
+                [38, 195, 41, 255],
+                [0, 150, 41, 255],
+                [0, 110, 71, 255],
+                [0, 74, 98, 255],
+                [0, 41, 121, 255],
+                [0, 13, 139, 255],
+                [0, 14, 128, 255],
+                [0, 37, 95, 255],
+                [0, 56, 66, 255],
+                [0, 72, 40, 255],
+                [0, 83, 19, 255],
+                [0, 90, 2, 255],
+                [0, 69, 13, 255],
+                [0, 48, 24, 255],
+                [0, 33, 29, 255],
+                [0, 23, 29, 255],
+                [0, 19, 24, 255],
+                [0, 21, 11, 255],
+                [0, 26, 6, 255],
+                [0, 39, 28, 255],
+                [0, 66, 36, 255],
+                [0, 107, 31, 255],
+                [0, 161, 12, 255],
+                [0, 188, 20, 255],
+                [0, 158, 61, 255],
+                [0, 113, 96, 255],
+                [0, 72, 127, 255],
+                [0, 36, 154, 255],
+                [0, 3, 176, 255],
+                [0, 27, 142, 255]
+            ]
         );
-        println!(
-            "{:?}",
-            gpu_state.cus[0].waves[0].vgprfs[1]
-                .iter()
-                .map(|r| castToFValue(&r.val))
-                .collect::<Vec<_>>()
-        );
+        // println!("{:?}", line);
+        // println!(
+        //     "{:?}",
+        //     gpu_state.cus[0].waves[0].vgprfs[0]
+        //         .iter()
+        //         .map(|r| castToFValue(&r.val))
+        //         .collect::<Vec<_>>()
+        // );
+        // println!(
+        //     "{:?}",
+        //     gpu_state.cus[0].waves[0].vgprfs[1]
+        //         .iter()
+        //         .map(|r| castToFValue(&r.val))
+        //         .collect::<Vec<_>>()
+        // );
     }
 
     #[test]
