@@ -2,3 +2,7 @@
 **/*.rs.bk
 Cargo.lock
 .vscode/launch.json
+/pkg
+www/node_modules
+www/dist
+www/.bin

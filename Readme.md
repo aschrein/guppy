@@ -89,15 +89,17 @@ ret
 * memory io instructions
     * ~~read only raw buffers~~
     * ~~write only raw buffers~~
-    * write only typed textures
-    * read only typed textures
+    * read-write raw buffers
+    * ~~write only typed textures~~
+    * ~~read only typed textures~~
+    * read-write typed textures
     * ~~buffer/texture binding mechanism~~
     * ~~gather/scatter merging~~
-        * ~~cache line collision resolution between L1s(false sharing/coalescing)~~
     * ~~cache system~~
         * banks
     * sampling system
     * atomic operations
+        * cache line collision resolution between L1s(false sharing/coalescing)
 * thread group instructions
     * barriers
     * fences
