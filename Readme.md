@@ -1,4 +1,13 @@
 # Toy GPU emulator
+## Build
+```console
+cd https://github.com/aschrein/guppy && cd guppy
+wasm-pack build
+cd www
+npm install && npm run start
+```
+___
+## Features
 * Approximates clock cycle cost of instructions
     * ALU latency
     * Sampler/L1/L2/memory latency

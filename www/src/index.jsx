@@ -5,11 +5,6 @@ import reducer from './reducer';
 import React, { useState } from 'react';
 import ReactDOM from 'react-dom';
 import { HashRouter } from 'react-router-dom';
-const wasm = import("guppy_rust");
-wasm.then(wasm => {
-    // wasm.greet("Webass!");
-    console.log("wasm loaded")
-});
 
 function setState(state) {
     return {

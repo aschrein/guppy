@@ -2815,6 +2815,7 @@ pub fn set_panic_hook() {
     // https://github.com/rustwasm/console_error_panic_hook#readme
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
+    alert("PANIC!");
 }
 
 use wasm_bindgen::prelude::*;
@@ -2826,14 +2827,87 @@ use wasm_bindgen::prelude::*;
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 #[wasm_bindgen]
-extern {
+extern "C" {
     fn alert(s: &str);
 }
-
 
 #[wasm_bindgen]
 pub fn greet(s: &str) {
     alert(&format!("Hello from guppy_rust, {}!", s));
+}
+
+static mut g_gpu_state: Option<Box<GPUState>> = None;
+
+#[wasm_bindgen]
+pub fn guppy_create_gpu_state() {
+    let config = GPUConfig {
+        DRAM_latency: 4,
+        DRAM_bandwidth: 64 * 32,
+        L1_size: 1 << 10,
+        L1_latency: 4,
+        L2_size: 1 << 14,
+        L2_latency: 4,
+        sampler_cache_size: 1 << 10,
+        sampler_latency: 4,
+        sampler_cache_latency: 10,
+        SLM_size: 1 << 14,
+        SLM_latency: 20,
+        SLM_banks: 32,
+        VGPRF_per_pe: 8,
+        SGPRF_per_wave: 16,
+        wave_size: 8,
+        CU_count: 2,
+        ALU_per_cu: 2,
+        waves_per_cu: 4,
+        fd_per_cu: 4,
+        ALU_pipe_len: 1,
+    };
+    unsafe {
+        g_gpu_state = Some(Box::new(GPUState::new(&config)));
+    }
+}
+
+#[wasm_bindgen]
+pub fn guppy_dispatch(text: &str, group_size: u32, groups_count: u32) {
+    alert(text);
+    let res = parse(text);
+    let program = Program { ins: res };
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+    dispatch(
+        gpu_state,
+        &program,
+        vec![],
+        vec![],
+        vec![],
+        group_size,
+        groups_count,
+    );
+}
+
+#[wasm_bindgen]
+pub fn guppy_clock() -> bool {
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+    clock(gpu_state)
+}
+
+#[wasm_bindgen]
+pub fn guppy_get_active_mask() -> Vec<u8> {
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+    gpu_state
+        .cus
+        .iter()
+        .flat_map(|cu| {
+            cu.waves
+                .iter()
+                .flat_map(|wave| {
+                    wave.exec_mask
+                        .iter()
+                        .map(|v| if *v { 1 } else { 0 })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]
