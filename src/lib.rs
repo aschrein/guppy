@@ -2855,10 +2855,10 @@ pub fn guppy_create_gpu_state() {
         SLM_banks: 32,
         VGPRF_per_pe: 8,
         SGPRF_per_wave: 16,
-        wave_size: 8,
+        wave_size: 32,
         CU_count: 2,
-        ALU_per_cu: 2,
-        waves_per_cu: 4,
+        ALU_per_cu: 1,
+        waves_per_cu: 2,
         fd_per_cu: 4,
         ALU_pipe_len: 1,
     };
@@ -2869,7 +2869,7 @@ pub fn guppy_create_gpu_state() {
 
 #[wasm_bindgen]
 pub fn guppy_dispatch(text: &str, group_size: u32, groups_count: u32) {
-    alert(text);
+    //alert(text);
     let res = parse(text);
     let program = Program { ins: res };
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
@@ -2893,21 +2893,27 @@ pub fn guppy_clock() -> bool {
 #[wasm_bindgen]
 pub fn guppy_get_active_mask() -> Vec<u8> {
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
-    gpu_state
-        .cus
-        .iter()
-        .flat_map(|cu| {
-            cu.waves
-                .iter()
-                .flat_map(|wave| {
-                    wave.exec_mask
-                        .iter()
-                        .map(|v| if *v { 1 } else { 0 })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>()
+    let mut active_mask: Vec<u8> = Vec::new();
+    let wave_size = gpu_state.config.wave_size;
+    for cu in &gpu_state.cus {
+        for wave in &cu.waves {
+            if wave.enabled {
+                for bit in &wave.exec_mask {
+                    if *bit {
+                        active_mask.push(1);
+                    } else {
+                        active_mask.push(0);
+                    }
+                }
+            } else {
+                for i in 0..wave_size {
+                    active_mask.push(2);
+                }
+            }
+        }
+    }
+    //alert(&format!("Hello from guppy_rust, {}!", active_mask.len()));
+    active_mask
 }
 
 #[cfg(test)]
