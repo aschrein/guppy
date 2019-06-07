@@ -40,6 +40,7 @@ class App extends React.Component {
     }
 
     onClick() {
+        let globals = this.props.globals();
         if (this.props.globals().wasm) {
             this.props.globals().active_mask_history = [];
             this.props.globals().alu_active_history = [];
@@ -49,6 +50,20 @@ class App extends React.Component {
                 config["group_size"],
                 config["groups_count"]
             );
+            for (var i = 0; i < globals.r_images.length; i++) {
+                globals.wasm.guppy_put_image(globals.r_images[i]);
+            }
+            let ctx = this.refs.canvas.getContext('2d');
+            let image = new Image();
+            let canvas = this.refs.canvas;
+            image.onload = function () {
+                canvas.width = image.width;
+                canvas.height = image.height;
+                ctx.drawImage(image, 0, 0);
+            };
+            let base64 = "data:image/png;base64," + globals.wasm.guppy_get_image(0);
+            console.log(base64);
+            image.src = base64;
             this.props.globals().run = true;
         } else {
             console.log("[WARNING] wasm in null");
@@ -96,7 +111,7 @@ LB_2:\n\
         this.text = def_value;
         return (
             <div className="ace_editor_container">
-                <button style={{margin:10}} onClick={this.onClick}>
+                <button style={{ margin: 10 }} onClick={this.onClick}>
                     Execute
                 </button>
                 <AceEditor
@@ -111,9 +126,10 @@ LB_2:\n\
                     }}
                     autoScrollEditorIntoView={false}
                     wrapEnabled={false}
-                    height="1024px"
+                    height="700px"
                     width="512px"
                 />
+                <canvas style={{ display: "none" }} ref="canvas"></canvas>
             </div>
         );
     }
@@ -135,27 +151,27 @@ class Parameters extends React.Component {
         console.log("onchange", key, value);
         this.props.globals().gpuConfig[key] = value;
         this.props.globals().resetGPU();
-        
+
     }
 
     onChangeDispatch(key, value, parent, data) {
         console.log("onChangeDispatch", key, value);
         this.props.globals().dispatchConfig[key] = value;
-        
+
     }
 
     render() {
 
         return (
             <div>
-                <p style={{color:"white", margin:10}}>GPU Config</p>
+                <p style={{ color: "white", margin: 10 }}>GPU Config</p>
                 <JSONEditor
                     data={
                         this.props.globals().gpuConfig
                     }
                     onChange={this.onChange}
                 />
-                <p style={{color:"white", margin:10}}>Dispatch config</p>
+                <p style={{ color: "white", margin: 10 }}>Dispatch config</p>
                 <JSONEditor
                     data={
                         this.props.globals().dispatchConfig
@@ -167,9 +183,53 @@ class Parameters extends React.Component {
     }
 }
 
+class Memory extends React.Component {
+
+    constructor(props, context) {
+        super(props, context);
+
+        this.onChange = this.onChange.bind(this);
+    }
+
+    componentDidMount() {
+        this.ctx = this.refs.canvas.getContext('2d');
+        let img = this.refs.img;
+        img.onload = () => {
+            this.refs.canvas.width = img.width;
+            this.refs.canvas.height = img.height;
+            this.ctx.drawImage(img, 0, 0);
+            var p = this.ctx.getImageData(0, 0, 1, 1).data;
+            function rgbToHex(r, g, b) {
+                if (r > 255 || g > 255 || b > 255)
+                    throw "Invalid color component";
+                return ((r << 16) | (g << 8) | b).toString(16);
+            }
+            var hex = "#" + ("000000" + rgbToHex(p[0], p[1], p[2])).slice(-6);
+            let base64 = this.refs.canvas.toDataURL('image/png');
+            this.props.globals().r_images.push(base64);
+            console.log(base64);
+        };
+
+    }
+
+    onChange() {
+
+    }
+
+    render() {
+
+        return (
+            <div>
+                <canvas ref="canvas" />
+                <img style={{ display: "none" }} ref="img" src="img/lenna.png"></img>
+            </div>
+        );
+    }
+}
+
 class CanvasComponent extends React.Component {
     componentDidMount() {
-        this.neededWidth= 512;
+        this.neededWidth = 512;
         this.neededHeight = 512;
         this.updateCanvas = this.updateCanvas.bind(this);
         this.onResize = this.onResize.bind(this);
@@ -180,18 +240,6 @@ class CanvasComponent extends React.Component {
         this.globals().updateCanvas = this.updateCanvas;
 
         this.updateCanvas();
-
-        // layout.on('componentCreated',function(component) {
-        //     component.container.on('resize',function() {
-        //         console.log('component.resize', component);
-        //         if (component.onResize) {
-        //             component.onResize();
-        //         }
-        //     });
-        // });
-        // this.props.container.on('resize', function (comp) {
-        //     console.log('component.resize', comp.componentName);
-        // });
     }
 
     componentWillUnmount() {
@@ -220,7 +268,7 @@ class CanvasComponent extends React.Component {
                 canvas.fillStyle = "#ffffff";
                 canvas.fillText(welcomeMessage, 0, y);
                 // console.log('updateCanvas', history[0].length);
-                
+
                 var exec_mask_offset = y + 16;
                 for (var i = 0; i < history.length; i++) {
                     this.neededHeight = Math.max(this.neededHeight, y);
@@ -298,12 +346,14 @@ class GoldenLayoutWrapper extends React.Component {
     }
     componentDidMount() {
         this.globals = {};
-        this.globals.dispatchConfig = {"group_size":32, "groups_count": 2};
+        this.globals.dispatchConfig = { "group_size": 32, "groups_count": 2 };
         this.globals.gpuConfig = {
             "DRAM_latency": 4,
             "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 4, "L2_size": 16384, "L2_latency": 4, "sampler_cache_size": 1024,
-            "sampler_latency": 4, "VGPRF_per_pe": 8, "wave_size": 32, "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 2, "ALU_pipe_len": 1 };
+            "sampler_latency": 4, "VGPRF_per_pe": 8, "wave_size": 32, "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 2, "ALU_pipe_len": 1
+        };
         this.globals.wasm = null;
+        this.globals.r_images = [];
         this.globals.active_mask_history = null;
         this.globals.alu_active_history = null;
 
@@ -324,12 +374,23 @@ class GoldenLayoutWrapper extends React.Component {
                     title: 'Canvas',
                     props: { globals: () => this.globals }
 
-                }
-                    , {
-                    type: 'react-component',
-                    component: 'Parameters',
-                    title: 'Parameters',
-                    props: { globals: () => this.globals }
+                },
+                {
+                    type: 'column',
+                    content: [
+                        {
+                            type: 'react-component',
+                            component: 'Parameters',
+                            title: 'Parameters',
+                            props: { globals: () => this.globals }
+                        },
+                        {
+                            type: 'react-component',
+                            component: 'Memory',
+                            title: 'Memory',
+                            props: { globals: () => this.globals }
+                        }
+                    ]
                 }
                 ]
             }]
@@ -359,6 +420,9 @@ class GoldenLayoutWrapper extends React.Component {
         );
         layout.registerComponent('Parameters',
             Parameters
+        );
+        layout.registerComponent('Memory',
+            Memory
         );
         layout.init();
         window.React = React;

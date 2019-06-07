@@ -436,6 +436,7 @@ struct DispInstruction {
 }
 
 struct VALUState {
+    active: bool,
     // Size is fixed
     pipe: Vec<Option<DispInstruction>>,
 }
@@ -688,7 +689,10 @@ impl CUState {
             for i in 0..config.ALU_pipe_len {
                 pipe.push(None);
             }
-            valus.push(VALUState { pipe: pipe });
+            valus.push(VALUState {
+                active: false,
+                pipe: pipe,
+            });
         }
         salus.push(SALUState {});
         let mut fes: Vec<FEState> = Vec::new();
@@ -742,15 +746,12 @@ impl GPUState {
         let mut res: u32 = 0;
         for cu in &self.cus {
             for alu in &cu.valus {
-                for inst in &alu.pipe {
-                    if inst.is_some() {
-                        res += 1;
-                    }
+                if alu.active {
+                    res += 1;
                 }
             }
         }
-        100.0 * (res as f64)
-            / (self.config.CU_count * self.config.ALU_per_cu * self.config.ALU_pipe_len) as f64
+        100.0 * (res as f64) / (self.config.CU_count * self.config.ALU_per_cu) as f64
     }
     fn findFreeWave(&self) -> Option<(usize, usize)> {
         for (i, cu) in self.cus.iter().enumerate() {
@@ -2248,7 +2249,9 @@ fn clock(gpu_state: &mut GPUState) -> bool {
             // Now do work on Vector ALUs
             for valu in &mut cu.valus {
                 let inst = valu.pop();
+                valu.active = false;
                 if inst.is_some() {
+                    valu.active = true;
                     didSomeWork = true;
 
                     let dispInst = inst.unwrap();
@@ -2801,11 +2804,11 @@ enum Event {
     INST_RETIRED((u32, u32)),
 }
 
-fn save_image(gpu_state: &GPUState, view: &Texture2D, name: &str) {
-    extern crate image;
-    use image::{GenericImage, GenericImageView, ImageBuffer, RgbImage};
-    let mut img: RgbImage = ImageBuffer::new(view.width, view.height);
+extern crate image;
+use image::{GenericImage, GenericImageView, ImageBuffer, RgbImage};
 
+fn save_image(gpu_state: &GPUState, view: &Texture2D, name: &str) {
+    let mut img: RgbImage = ImageBuffer::new(view.width, view.height);
     for i in 0..view.height {
         for j in 0..view.width {
             let raw_val = gpu_state.mem[(view.offset / 4 + view.pitch / 4 * i + j) as usize];
@@ -2860,12 +2863,29 @@ pub fn greet(s: &str) {
     alert(&format!("Hello from guppy_rust, {}!", s));
 }
 
+struct BindingState {
+    mem: Vec<u32>,
+    r_views: Vec<View>,
+    rw_views: Vec<View>,
+    samplers: Vec<Sampler>,
+}
+
 static mut g_gpu_state: Option<Box<GPUState>> = None;
+static mut g_bind_state: Option<BindingState> = None;
 
 #[wasm_bindgen]
 pub fn guppy_create_gpu_state(config_str: String) {
     let config: GPUConfig = serde_json::from_str(config_str.as_str()).unwrap();
     unsafe {
+        g_bind_state = Some(BindingState {
+            mem: Vec::new(),
+            r_views: Vec::new(),
+            rw_views: Vec::new(),
+            samplers: Vec::new(),
+        });
+        for i in 0..16 {
+            g_bind_state.as_mut().unwrap().mem.push(0);
+        }
         g_gpu_state = Some(Box::new(GPUState::new(&config)));
     }
 }
@@ -2907,6 +2927,90 @@ pub fn guppy_clock() -> bool {
     clock(gpu_state)
 }
 
+extern crate base64;
+
+use base64::{decode, encode};
+extern crate png;
+use png::{Decoder, Encoder};
+
+fn from_base64(base64: String) -> Vec<u8> {
+    let offset = base64.find(',').unwrap_or(base64.len()) + 1;
+    let mut value = base64;
+    value.drain(..offset);
+    return decode(value.as_str()).unwrap();
+}
+
+#[wasm_bindgen]
+pub fn guppy_put_image(base64: String) -> u32 {
+    let bytes = std::io::Cursor::new(from_base64(base64));
+    let decoder = png::Decoder::new(bytes);
+    let (info, mut reader) = decoder.read_info().unwrap();
+    assert_eq!(info.width as i32 & -(info.width as i32), info.width as i32);
+    assert_eq!(
+        info.height as i32 & -(info.height as i32),
+        info.height as i32
+    );
+    let mut image = vec![0; info.buffer_size()];
+    reader.next_frame(&mut image).unwrap();
+    let bind_state = unsafe { g_bind_state.as_mut().unwrap() };
+    assert_eq!(image.len() % 4, 0);
+    bind_state.r_views.push(View::TEXTURE2D(Texture2D {
+        offset: bind_state.mem.len() as u32 * 4,
+        pitch: info.width * 4,
+        width: info.width,
+        height: info.height,
+        format: TextureFormat::RGBA8_UNORM,
+    }));
+    for i in 0..image.len() / 4 {
+        let b0 = image[i * 4];
+        let b1 = image[i * 4 + 1];
+        let b2 = image[i * 4 + 2];
+        let b3 = image[i * 4 + 3];
+        let val: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
+        bind_state.mem.push(val);
+    }
+    alert(&format!(
+        "image is created! size: {} x {} first pixel: {:x}!",
+        info.width, info.height, bind_state.mem[64]
+    ));
+
+    bind_state.r_views.len() as u32 - 1
+}
+
+#[wasm_bindgen]
+pub fn guppy_get_image(id: u32) -> String {
+    let bind_state = unsafe { g_bind_state.as_mut().unwrap() };
+    let tex2d = match &bind_state.r_views[id as usize] {
+        View::TEXTURE2D(tex) => tex,
+        _ => std::panic!(),
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let format = match tex2d.format {
+        TextureFormat::RGBA8_UNORM => TextureFormat::RGBA8_UNORM,
+        _ => std::panic!(),
+    };
+    for i in 0..tex2d.height {
+        for j in 0..tex2d.width {
+            let pixel = bind_state.mem[((tex2d.offset + i * tex2d.pitch + j * 4) / 4) as usize];
+            let b0 = ((pixel) & 0xff) as u8;
+            let b1 = ((pixel >> 8) & 0xff) as u8;
+            let b2 = ((pixel >> 16) & 0xff) as u8;
+            let b3 = ((pixel >> 24) & 0xff) as u8;
+            buf.push(b0);
+            buf.push(b1);
+            buf.push(b2);
+            buf.push(b3);
+        }
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    let encoder = image::png::PNGEncoder::new(&mut bytes);
+    // png::Encoder::new(bytes, tex2d.width,tex2d.height);
+    encoder.encode(&buf, tex2d.width,tex2d.height, image::ColorType::RGBA(8))
+    .expect("error encoding png");
+    //encode(&buf, tex2d.width,tex2d.height, png::ColorType::RGBA);
+    encode(&bytes)
+}
+
 #[wasm_bindgen]
 pub fn guppy_get_active_mask() -> Vec<u8> {
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
@@ -2935,7 +3039,6 @@ pub fn guppy_get_active_mask() -> Vec<u8> {
             }
         }
     }
-    //alert(&format!("Hello from guppy_rust, {}!", active_mask.len()));
     active_mask
 }
 
