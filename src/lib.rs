@@ -396,12 +396,12 @@ impl WaveState {
             }
             vgprfs.push(vpgrf);
         }
-        for i in 0..config.SGPRF_per_wave {
-            sgprf.push(Register {
-                val: [0, 0, 0, 0],
-                locked: false,
-            });
-        }
+        // for i in 0..config.SGPRF_per_wave {
+        //     sgprf.push(Register {
+        //         val: [0, 0, 0, 0],
+        //         locked: false,
+        //     });
+        // }
         let mut exec_mask: Vec<bool> = Vec::new();
         for i in 0..config.wave_size {
             exec_mask.push((i + wave_id * config.wave_size) < group_size);
@@ -1313,8 +1313,16 @@ struct ALUInstMeta {
     throughput: u32,
 }
 
-#[derive(Clone, Copy)]
-struct GPUConfig {
+#[macro_use]
+extern crate serde;
+extern crate serde_json;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Result;
+
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct GPUConfig {
     // ~300 clk
     DRAM_latency: u32,
     // Bytes per clock: 8, 16, 32, 64, 128, 256, 512
@@ -1335,22 +1343,22 @@ struct GPUConfig {
     // Sampler config
     // is part of CU
     sampler_cache_size: u32,
-    sampler_cache_latency: u32,
+    // sampler_cache_latency: u32,
     // Latency of sampler pipeline w/o memory latency
     sampler_latency: u32,
 
     // Shared Local Memory is part of CU
     // ~16kb
-    SLM_size: u32,
+    // SLM_size: u32,
     // ~20clk
-    SLM_latency: u32,
+    // SLM_latency: u32,
     // ~32
-    SLM_banks: u32,
+    // SLM_banks: u32,
 
     // Number of [u32 X 4] per Processing Unit
     VGPRF_per_pe: u32,
     // Number of [u32 X 4] per CU
-    SGPRF_per_wave: u32,
+    // SGPRF_per_wave: u32,
 
     // SIMD width of ALU
     wave_size: u32,
@@ -1853,7 +1861,6 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 continue;
                             }
                             wave.enabled = false;
-                            continue;
                         } else if let InstTy::LD = inst.ty {
                             let mut wave_gather_reqs: Vec<LDReq> = Vec::new();
                             let addr = wave.getValues(&inst.ops[2]);
@@ -2192,9 +2199,8 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                     _ => std::panic!(""),
                                 }
                                 assert!(valu.push(&dispInst));
-
-                                // Successfully dispatched
                                 break;
+                                
                             }
                             // If an instruction was issued then increment PC
                             if wave.has_been_dispatched {
@@ -2216,7 +2222,12 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                             std::panic!();
                         } else if dispatchOnSampler {
                             std::panic!();
+                        } else {
+                            std::panic!();
                         }
+
+                        // Successfully dispatched
+                        break;
                     }
                 }
             }
@@ -2839,32 +2850,33 @@ pub fn greet(s: &str) {
 static mut g_gpu_state: Option<Box<GPUState>> = None;
 
 #[wasm_bindgen]
-pub fn guppy_create_gpu_state() {
-    let config = GPUConfig {
-        DRAM_latency: 4,
-        DRAM_bandwidth: 64 * 32,
-        L1_size: 1 << 10,
-        L1_latency: 4,
-        L2_size: 1 << 14,
-        L2_latency: 4,
-        sampler_cache_size: 1 << 10,
-        sampler_latency: 4,
-        sampler_cache_latency: 10,
-        SLM_size: 1 << 14,
-        SLM_latency: 20,
-        SLM_banks: 32,
-        VGPRF_per_pe: 8,
-        SGPRF_per_wave: 16,
-        wave_size: 32,
-        CU_count: 2,
-        ALU_per_cu: 1,
-        waves_per_cu: 2,
-        fd_per_cu: 4,
-        ALU_pipe_len: 1,
-    };
+pub fn guppy_create_gpu_state(config_str: String) {
+    let config: GPUConfig = serde_json::from_str(config_str.as_str()).unwrap();
+    // let config = GPUConfig {
+    //     DRAM_latency: 4,
+    //     DRAM_bandwidth: 64 * 32,
+    //     L1_size: 1 << 10,
+    //     L1_latency: 4,
+    //     L2_size: 1 << 14,
+    //     L2_latency: 4,
+    //     sampler_cache_size: 1 << 10,
+    //     sampler_latency: 4,
+    //     VGPRF_per_pe: 8,
+    //     wave_size: 32,
+    //     CU_count: 2,
+    //     ALU_per_cu: 2,
+    //     waves_per_cu: 4,
+    //     fd_per_cu: 1,
+    //     ALU_pipe_len: 2,
+    // };
     unsafe {
         g_gpu_state = Some(Box::new(GPUState::new(&config)));
     }
+}
+
+#[wasm_bindgen]
+pub fn guppy_get_config() -> String {
+    unsafe { serde_json::to_string(&g_gpu_state.as_ref().unwrap().config).unwrap() }
 }
 
 #[wasm_bindgen]
@@ -2899,10 +2911,16 @@ pub fn guppy_get_active_mask() -> Vec<u8> {
         for wave in &cu.waves {
             if wave.enabled {
                 for bit in &wave.exec_mask {
-                    if *bit {
-                        active_mask.push(1);
+                    if wave.stalled {
+                        active_mask.push(3);
+                    } else if !wave.has_been_dispatched {
+                        active_mask.push(4);
                     } else {
-                        active_mask.push(0);
+                        if *bit {
+                            active_mask.push(1);
+                        } else {
+                            active_mask.push(0);
+                        }
                     }
                 }
             } else {
@@ -2961,12 +2979,7 @@ mod tests {
             L2_latency: 4,
             sampler_cache_size: 1 << 10,
             sampler_latency: 4,
-            sampler_cache_latency: 10,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 32,
             CU_count: 8,
             ALU_per_cu: 4,
@@ -3156,13 +3169,7 @@ mod tests {
             L2_latency: 4,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 16,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -3260,12 +3267,7 @@ mod tests {
             L2_latency: 20,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 32,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -3344,13 +3346,7 @@ mod tests {
             L2_latency: 200,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 16,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -3427,13 +3423,7 @@ mod tests {
             L2_latency: 200,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 32,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -3480,13 +3470,7 @@ mod tests {
             L2_latency: 200,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 32,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -3656,13 +3640,7 @@ mod tests {
             L2_latency: 200,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 8,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -3804,13 +3782,7 @@ mod tests {
             L2_latency: 200,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 4,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -3906,13 +3878,7 @@ mod tests {
             L2_latency: 200,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 4,
             CU_count: 2,
             ALU_per_cu: 2,
@@ -4239,13 +4205,7 @@ mod tests {
             L2_latency: 200,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
-
-            sampler_cache_latency: 100,
-            SLM_size: 1 << 14,
-            SLM_latency: 20,
-            SLM_banks: 32,
             VGPRF_per_pe: 8,
-            SGPRF_per_wave: 16,
             wave_size: 4,
             CU_count: 2,
             ALU_per_cu: 2,

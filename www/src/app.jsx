@@ -4,9 +4,9 @@ import ReactDOM from 'react-dom';
 import './css/main.css';
 import AceEditor from 'react-ace';
 import 'brace/mode/assembly_x86';
-
 // Import a Theme (okadia, github, xcode etc)
-import 'brace/theme/twilight';
+import 'brace/theme/tomorrow_night_eighties';
+import { JSONEditor } from 'react-json-editor-viewer';
 
 function onChange(newValue) {
     console.log('change', newValue);
@@ -35,8 +35,11 @@ class App extends React.Component {
     onClick() {
         if (this.props.globals().wasm) {
             this.props.globals().active_mask_history = [];
+            let config = this.props.globals().dispatchConfig;
             this.props.globals().wasm.guppy_dispatch(
-                this.text, 32, 8
+                this.text,
+                config["group_size"],
+                config["groups_count"]
             );
             this.props.globals().run = true;
         } else {
@@ -85,19 +88,67 @@ LB_2:\n\
         this.text = def_value;
         return (
             <div>
-                <button onClick={this.onClick}>
+                <button style={{margin:10}} onClick={this.onClick}>
                     Execute
                 </button>
                 <AceEditor
                     value={def_value}
                     ref="editor"
                     mode="assembly_x86"
-                    theme="twilight"
+                    theme="tomorrow_night_eighties"
                     onChange={this.onChange}
                     name="UNIQUE_ID_OF_DIV"
                     editorProps={{
                         $blockScrolling: true
                     }}
+                />
+            </div>
+        );
+    }
+}
+
+class Parameters extends React.Component {
+
+    constructor(props, context) {
+        super(props, context);
+
+        this.onChange = this.onChange.bind(this);
+        this.onChangeDispatch = this.onChangeDispatch.bind(this);
+    }
+
+    componentDidMount() {
+    }
+
+    onChange(key, value, parent, data) {
+        console.log("onchange", key, value);
+        this.props.globals().gpuConfig[key] = value;
+        this.props.globals().resetGPU();
+        
+    }
+
+    onChangeDispatch(key, value, parent, data) {
+        console.log("onChangeDispatch", key, value);
+        this.props.globals().dispatchConfig[key] = value;
+        
+    }
+
+    render() {
+
+        return (
+            <div>
+                <p style={{color:"white", margin:10}}>GPU Config</p>
+                <JSONEditor
+                    data={
+                        this.props.globals().gpuConfig
+                    }
+                    onChange={this.onChange}
+                />
+                <p style={{color:"white", margin:10}}>Dispatch config</p>
+                <JSONEditor
+                    data={
+                        this.props.globals().dispatchConfig
+                    }
+                    onChange={this.onChangeDispatch}
                 />
             </div>
         );
@@ -157,23 +208,27 @@ class CanvasComponent extends React.Component {
                 canvas.fillText(welcomeMessage, 0, 0);
                 // console.log('updateCanvas', history[0].length);
                 var x = 0;
-                var y = 16;
+                var exec_mask_offset = 16;
                 for (var i = 0; i < history.length; i++) {
-                    x = 0;
+                    var y = exec_mask_offset;
                     for (var j = 0; j < history[0].length; j++) {
                         if (j % 32 == 0)
-                            x += 4;
+                            y += 4;
                         if (history[i][j] == 1) {
                             this.ctx.fillStyle = "white";
                         } else if (history[i][j] == 0) {
                             this.ctx.fillStyle = "black";
                         } else if (history[i][j] == 2) {
                             this.ctx.fillStyle = "grey";
+                        } else if (history[i][j] == 3) {
+                            this.ctx.fillStyle = "blue";
+                        } else if (history[i][j] == 4) {
+                            this.ctx.fillStyle = "red";
                         }
                         this.ctx.fillRect(x, y, 2, 2);
-                        x += 2;
+                        y += 2;
                     }
-                    y += 2;
+                    x += 2;
                 }
             }
         }
@@ -200,9 +255,14 @@ class GoldenLayoutWrapper extends React.Component {
     }
     componentDidMount() {
         this.globals = {};
+        this.globals.dispatchConfig = {"group_size":32, "groups_count": 2};
+        this.globals.gpuConfig = {
+            "DRAM_latency": 4,
+            "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 4, "L2_size": 16384, "L2_latency": 4, "sampler_cache_size": 1024,
+            "sampler_latency": 4, "VGPRF_per_pe": 8, "wave_size": 32, "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 2, "ALU_pipe_len": 1 };
         this.globals.wasm = null;
         this.globals.active_mask_history = null;
-        
+
         this.intervalId = setInterval(this.timer.bind(this), 1);
         // Build basic golden-layout config
         const config = {
@@ -221,43 +281,30 @@ class GoldenLayoutWrapper extends React.Component {
                     props: { globals: () => this.globals }
 
                 }
-                    // , {
-                    //     type: 'react-component',
-                    //     component: 'Dummy',
-                    //     title: 'Dummy',
-                    //     props: { globals: () => this.globals }
-                    // }
+                    , {
+                    type: 'react-component',
+                    component: 'Parameters',
+                    title: 'Parameters',
+                    props: { globals: () => this.globals }
+                }
                 ]
             }]
-        };
-
-        function wrapComponent(Component, container, globals) {
-            class Wrapped extends React.Component {
-                // componentDidMount() {
-                //     this.onResize = this.onResize.bind(this);
-                //     this.component = this.refs.component;
-                // }
-                // onResize() {
-                //     this.component.onResize();
-                // }
-                render() {
-                    return (
-                        <Component refs="component" container={container} globals={globals} />
-                    );
-                }
-            }
-            return Wrapped;
         };
 
         var layout = new GoldenLayout(config, this.layout);
         this.layout = layout;
         let globals = this.globals;
+        this.globals.resetGPU = function () {
+            globals.wasm.guppy_create_gpu_state(
+                JSON.stringify(globals.gpuConfig));
+            globals.active_mask_history = [];
+        }
         _wasm.then(wasm => {
             layout.updateSize();
             this.globals.wasm = wasm;
-            this.globals.wasm.guppy_create_gpu_state();
-            this.globals.active_mask_history = [];
-            console.log("wasm loaded");
+            this.globals.resetGPU();
+            //console.log("wasm loaded");
+            //console.log(wasm.guppy_get_config());
 
         });
         layout.registerComponent('Canvas', CanvasComponent
@@ -265,9 +312,9 @@ class GoldenLayoutWrapper extends React.Component {
         layout.registerComponent('TextEditor',
             App
         );
-        // layout.registerComponent('Dummy',
-        //     App
-        // );
+        layout.registerComponent('Parameters',
+            Parameters
+        );
         layout.init();
         window.React = React;
         window.ReactDOM = ReactDOM;
@@ -276,12 +323,13 @@ class GoldenLayoutWrapper extends React.Component {
         });
 
 
-        layout.updateSize();
+        //layout.updateSize();
     }
 
     render() {
         return (
-            <div className='goldenLayout' ref={input => this.layout = input} />
+            <div className='goldenLayout'
+                ref={input => this.layout = input} />
         );
     }
 }

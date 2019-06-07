@@ -20,7 +20,7 @@ canvas {
     margin: 10px;
 }
 
-ace_editor {
+#editor {
     width: 100%;
     height: 100%;
 }
