@@ -21,20 +21,28 @@ class App extends React.Component {
 
         this.onChange = this.onChange.bind(this);
         this.onClick = this.onClick.bind(this);
+        this.onResize = this.onResize.bind(this);
     }
 
     componentDidMount() {
         // this.refs.editor.setValue(
         //     "ret"
         // );
+        this.props.glContainer.on('resize', this.onResize);
     }
 
     onChange(newValue) {
         this.text = newValue;
     }
+
+    onResize() {
+        // this.refs.editor.resize();
+    }
+
     onClick() {
         if (this.props.globals().wasm) {
             this.props.globals().active_mask_history = [];
+            this.props.globals().alu_active_history = [];
             let config = this.props.globals().dispatchConfig;
             this.props.globals().wasm.guppy_dispatch(
                 this.text,
@@ -87,7 +95,7 @@ LB_2:\n\
     ret";
         this.text = def_value;
         return (
-            <div>
+            <div className="ace_editor_container">
                 <button style={{margin:10}} onClick={this.onClick}>
                     Execute
                 </button>
@@ -101,6 +109,10 @@ LB_2:\n\
                     editorProps={{
                         $blockScrolling: true
                     }}
+                    autoScrollEditorIntoView={false}
+                    wrapEnabled={false}
+                    height="1024px"
+                    width="512px"
                 />
             </div>
         );
@@ -157,6 +169,8 @@ class Parameters extends React.Component {
 
 class CanvasComponent extends React.Component {
     componentDidMount() {
+        this.neededWidth= 512;
+        this.neededHeight = 512;
         this.updateCanvas = this.updateCanvas.bind(this);
         this.onResize = this.onResize.bind(this);
         this.ctx = this.refs.canvas.getContext('2d');
@@ -189,13 +203,12 @@ class CanvasComponent extends React.Component {
     }
 
     updateCanvas() {
-        const width = this.props.glContainer.width;
-        const height = this.props.glContainer.height;
-        this.canvas.width = width;
-        this.canvas.height = height;
+        this.canvas.width = this.neededWidth;
+        this.canvas.height = this.neededHeight;
         this.ctx.fillStyle = "#222222";
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-
+        var x = 0;
+        var y = 0;
         if (this.globals().active_mask_history) {
             let history = this.globals().active_mask_history;
             if (history.length > 0) {
@@ -205,12 +218,13 @@ class CanvasComponent extends React.Component {
                 canvas.textAlign = "start";
                 canvas.textBaseline = "top";
                 canvas.fillStyle = "#ffffff";
-                canvas.fillText(welcomeMessage, 0, 0);
+                canvas.fillText(welcomeMessage, 0, y);
                 // console.log('updateCanvas', history[0].length);
-                var x = 0;
-                var exec_mask_offset = 16;
+                
+                var exec_mask_offset = y + 16;
                 for (var i = 0; i < history.length; i++) {
-                    var y = exec_mask_offset;
+                    this.neededHeight = Math.max(this.neededHeight, y);
+                    y = exec_mask_offset;
                     for (var j = 0; j < history[0].length; j++) {
                         if (j % 32 == 0)
                             y += 4;
@@ -230,9 +244,38 @@ class CanvasComponent extends React.Component {
                     }
                     x += 2;
                 }
+                this.neededWidth = Math.max(this.neededWidth, x);
             }
         }
-
+        if (this.globals().alu_active_history) {
+            let history = this.globals().alu_active_history;
+            if (history.length > 0) {
+                var canvas = this.ctx;
+                canvas.font = "14px Monaco, monospace";
+                var welcomeMessage = "ALU Active history";
+                canvas.textAlign = "start";
+                canvas.textBaseline = "top";
+                canvas.fillStyle = "#ffffff";
+                canvas.fillText(welcomeMessage, 0, y + 16);
+                var exec_mask_offset = y + 32;
+                x = 0;
+                for (var i = 0; i < history.length; i++) {
+                    this.neededHeight = Math.max(this.neededHeight, y);
+                    y = exec_mask_offset;
+                    for (var j = 100; j >= 0; j--) {
+                        if (j <= history[i]) {
+                            this.ctx.fillStyle = "white";
+                        } else {
+                            this.ctx.fillStyle = "black";
+                        }
+                        this.ctx.fillRect(x, y, 2, 2);
+                        y += 2;
+                    }
+                    x += 2;
+                }
+                this.neededWidth = Math.max(this.neededWidth, x);
+            }
+        }
 
     }
     render() {
@@ -247,9 +290,9 @@ class GoldenLayoutWrapper extends React.Component {
                 this.globals.run = false;
             } else {
                 this.globals.active_mask_history.push(this.globals.wasm.guppy_get_active_mask());
+                this.globals.alu_active_history.push(this.globals.wasm.guppy_get_gpu_metric("ALU active"));
                 //if (this.globals.updateCanvas)
                 this.globals.updateCanvas();
-                // console.log();
             }
         }
     }
@@ -262,6 +305,7 @@ class GoldenLayoutWrapper extends React.Component {
             "sampler_latency": 4, "VGPRF_per_pe": 8, "wave_size": 32, "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 2, "ALU_pipe_len": 1 };
         this.globals.wasm = null;
         this.globals.active_mask_history = null;
+        this.globals.alu_active_history = null;
 
         this.intervalId = setInterval(this.timer.bind(this), 1);
         // Build basic golden-layout config
@@ -298,6 +342,7 @@ class GoldenLayoutWrapper extends React.Component {
             globals.wasm.guppy_create_gpu_state(
                 JSON.stringify(globals.gpuConfig));
             globals.active_mask_history = [];
+            globals.alu_active_history = [];
         }
         _wasm.then(wasm => {
             layout.updateSize();

@@ -738,6 +738,20 @@ impl GPUState {
             ld_reqs: HashMap::new(),
         }
     }
+    fn get_alu_active(&self) -> f64 {
+        let mut res: u32 = 0;
+        for cu in &self.cus {
+            for alu in &cu.valus {
+                for inst in &alu.pipe {
+                    if inst.is_some() {
+                        res += 1;
+                    }
+                }
+            }
+        }
+        100.0 * (res as f64)
+            / (self.config.CU_count * self.config.ALU_per_cu * self.config.ALU_pipe_len) as f64
+    }
     fn findFreeWave(&self) -> Option<(usize, usize)> {
         for (i, cu) in self.cus.iter().enumerate() {
             for (j, wave) in cu.waves.iter().enumerate() {
@@ -2200,7 +2214,6 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 }
                                 assert!(valu.push(&dispInst));
                                 break;
-                                
                             }
                             // If an instruction was issued then increment PC
                             if wave.has_been_dispatched {
@@ -2852,23 +2865,6 @@ static mut g_gpu_state: Option<Box<GPUState>> = None;
 #[wasm_bindgen]
 pub fn guppy_create_gpu_state(config_str: String) {
     let config: GPUConfig = serde_json::from_str(config_str.as_str()).unwrap();
-    // let config = GPUConfig {
-    //     DRAM_latency: 4,
-    //     DRAM_bandwidth: 64 * 32,
-    //     L1_size: 1 << 10,
-    //     L1_latency: 4,
-    //     L2_size: 1 << 14,
-    //     L2_latency: 4,
-    //     sampler_cache_size: 1 << 10,
-    //     sampler_latency: 4,
-    //     VGPRF_per_pe: 8,
-    //     wave_size: 32,
-    //     CU_count: 2,
-    //     ALU_per_cu: 2,
-    //     waves_per_cu: 4,
-    //     fd_per_cu: 1,
-    //     ALU_pipe_len: 2,
-    // };
     unsafe {
         g_gpu_state = Some(Box::new(GPUState::new(&config)));
     }
@@ -2894,6 +2890,15 @@ pub fn guppy_dispatch(text: &str, group_size: u32, groups_count: u32) {
         group_size,
         groups_count,
     );
+}
+
+#[wasm_bindgen]
+pub fn guppy_get_gpu_metric(name: String) -> f64 {
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+    match name.as_str() {
+        "ALU active" => gpu_state.get_alu_active(),
+        _ => std::panic!(),
+    }
 }
 
 #[wasm_bindgen]
@@ -2937,6 +2942,66 @@ pub fn guppy_get_active_mask() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mem_dummy() {
+        let res = parse(
+            r"
+                mov r1.x, thread_id
+                mul.u32 r1.x, r1.x, u(4)
+                ld r2.xy, t0.xw, r1.x
+                add.u32 r1.y, r1.x, u(4)
+                ld r3.x, t0.x, r1.y
+                add.u32 r2.x, r2.x, r2.y
+                ;mov r2.x, r2.x
+                st u0.x, r1.x, r2.x
+
+                ret
+                ",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 300,
+            DRAM_bandwidth: 256,
+            L1_size: 1 << 14,
+            L1_latency: 100,
+            L2_size: 1 << 15,
+            L2_latency: 200,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 100,
+            VGPRF_per_pe: 8,
+            wave_size: 16,
+            CU_count: 2,
+            ALU_per_cu: 2,
+            waves_per_cu: 16,
+            fd_per_cu: 4,
+            ALU_pipe_len: 4,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        gpu_state.mem = vec![
+            0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, // padding
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, // read buffer
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // write buffer
+        ];
+        let program = Program { ins: res };
+        dispatch(
+            &mut gpu_state,
+            &program,
+            vec![View::BUFFER(Buffer {
+                offset: 16,
+                size: 20 * 4,
+            })],
+            vec![View::BUFFER(Buffer {
+                offset: 16 + 20 * 4,
+                size: 16 * 4,
+            })],
+            vec![],
+            16,
+            1,
+        );
+        while clock(&mut gpu_state) {
+            println!("{:?}", gpu_state.get_alu_active());
+        }
+    }
 
     #[test]
     fn mem_test_texture() {
