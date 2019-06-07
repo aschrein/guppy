@@ -42,28 +42,18 @@ class App extends React.Component {
     onClick() {
         let globals = this.props.globals();
         if (this.props.globals().wasm) {
-            this.props.globals().active_mask_history = [];
-            this.props.globals().alu_active_history = [];
+            this.props.globals().resetGPU();
             let config = this.props.globals().dispatchConfig;
+            for (var i = 0; i < globals.r_images.length; i++) {
+                globals.wasm.guppy_put_image(globals.r_images[i]);
+            }
+            globals.wasm.guppy_init_framebuffer(256, 256);
             this.props.globals().wasm.guppy_dispatch(
                 this.text,
                 config["group_size"],
                 config["groups_count"]
             );
-            for (var i = 0; i < globals.r_images.length; i++) {
-                globals.wasm.guppy_put_image(globals.r_images[i]);
-            }
-            let ctx = this.refs.canvas.getContext('2d');
-            let image = new Image();
-            let canvas = this.refs.canvas;
-            image.onload = function () {
-                canvas.width = image.width;
-                canvas.height = image.height;
-                ctx.drawImage(image, 0, 0);
-            };
-            let base64 = "data:image/png;base64," + globals.wasm.guppy_get_image(0);
-            console.log(base64);
-            image.src = base64;
+           
             this.props.globals().run = true;
         } else {
             console.log("[WARNING] wasm in null");
@@ -71,6 +61,45 @@ class App extends React.Component {
     }
     render() {
         let def_value =
+        "\n\
+mov r0.xy, thread_id\n\
+and r0.x, r0.x, u(63)\n\
+div.u32 r0.y, r0.y, u(64)\n\
+mov r0.zw, r0.xy\n\
+utof r0.xy, r0.xy\n\
+; add 0.5 to fit the center of the texel\n\
+add.f32 r0.xy, r0.xy, f2(0.5 0.5)\n\
+; normalize coordinates\n\
+div.f32 r0.xy, r0.xy, f2(64.0 64.0)\n\
+; tx * 2.0 - 1.0\n\
+mul.f32 r0.xy, r0.xy, f2(2.0 2.0)\n\
+sub.f32 r0.xy, r0.xy, f2(1.0 1.0)\n\
+; rotate with pi/4\n\
+mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)\n\
+add.f32 r5.x, r4.x, r4.y\n\
+sub.f32 r5.y, r4.y, r4.x\n\
+;mul.f32 r5.x, r5.x, f(2.0)\n\
+mov r0.xy, r5.xy\n\
+; texture fetch\n\
+; coordinates are normalized\n\
+; type conversion and coordinate conversion happens here\n\
+sample r1.xyzw, t0.xyzw, s0, r0.xy\n\
+; coordinates are u32 here(in texels)\n\
+; type conversion needs to happen\n\
+st u0.xyzw, r0.zw, r1.xyzw\n\
+ret";
+
+        let def_value_0 =
+        "\
+mov r0.xy, thread_id\n\
+and r0.x, r0.x, u(63)\n\
+div.u32 r0.y, r0.y, u(64)\n\
+mov r0.zw, r0.xy\n\
+mov r1.xyzw, f4(1.0 0.0 0.0 1.0)\n\
+st u0.xyzw, r0.zw, r1.xyzw\n\
+ret\n\
+        ";
+        let def_value_1 =
             "\
     mov r4.w, lane_id\n\
     utof r4.xyzw, r4.wwww\n\
@@ -129,7 +158,6 @@ LB_2:\n\
                     height="700px"
                     width="512px"
                 />
-                <canvas style={{ display: "none" }} ref="canvas"></canvas>
             </div>
         );
     }
@@ -150,7 +178,7 @@ class Parameters extends React.Component {
     onChange(key, value, parent, data) {
         console.log("onchange", key, value);
         this.props.globals().gpuConfig[key] = value;
-        this.props.globals().resetGPU();
+        
 
     }
 
@@ -188,10 +216,11 @@ class Memory extends React.Component {
     constructor(props, context) {
         super(props, context);
 
-        this.onChange = this.onChange.bind(this);
+        this.updateMemory = this.updateMemory.bind(this);
     }
 
     componentDidMount() {
+        this.props.globals().updateMemory = this.updateMemory;
         this.ctx = this.refs.canvas.getContext('2d');
         let img = this.refs.img;
         img.onload = () => {
@@ -207,13 +236,24 @@ class Memory extends React.Component {
             var hex = "#" + ("000000" + rgbToHex(p[0], p[1], p[2])).slice(-6);
             let base64 = this.refs.canvas.toDataURL('image/png');
             this.props.globals().r_images.push(base64);
-            console.log(base64);
+            // console.log(base64);
         };
 
     }
 
-    onChange() {
-
+    updateMemory() {
+        let ctx = this.refs.canvas.getContext('2d');
+        let image = new Image();
+        let canvas = this.refs.canvas;
+        let globals = this.props.globals();
+        image.onload = function () {
+            canvas.width = image.width;
+            canvas.height = image.height;
+            ctx.drawImage(image, 0, 0);
+        };
+        let base64 = "data:image/png;base64," + globals.wasm.guppy_get_image(0, false);
+        // console.log(base64);
+        image.src = base64;
     }
 
     render() {
@@ -330,7 +370,6 @@ class CanvasComponent extends React.Component {
         return <canvas ref="canvas" />;
     }
 }
-
 class GoldenLayoutWrapper extends React.Component {
     timer() {
         if (this.globals.wasm && this.globals.run) {
@@ -340,6 +379,7 @@ class GoldenLayoutWrapper extends React.Component {
                 this.globals.active_mask_history.push(this.globals.wasm.guppy_get_active_mask());
                 this.globals.alu_active_history.push(this.globals.wasm.guppy_get_gpu_metric("ALU active"));
                 //if (this.globals.updateCanvas)
+                this.globals.updateMemory();
                 this.globals.updateCanvas();
             }
         }
@@ -400,6 +440,7 @@ class GoldenLayoutWrapper extends React.Component {
         this.layout = layout;
         let globals = this.globals;
         this.globals.resetGPU = function () {
+            globals.run = false;
             globals.wasm.guppy_create_gpu_state(
                 JSON.stringify(globals.gpuConfig));
             globals.active_mask_history = [];

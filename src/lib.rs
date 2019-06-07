@@ -2565,11 +2565,15 @@ fn parse(text: &str) -> Vec<Instruction> {
             continue;
         }
         let command = parts.unwrap();
-        let operands = &line[command.len() + 1..]
+        let operands: Vec<String> = if command.len() + 1 > line.len() {
+            Vec::new()
+        } else {
+            line[command.len() + 1..]
             .split(",")
             .map(|s| String::from(garbageRE.replace_all(s, "")))
             .filter(|s| s != "")
-            .collect::<Vec<String>>();
+            .collect::<Vec<String>>()
+        };
         // println!("{:?}", operands);
         let instr = match command.as_str() {
             "mov" | "utof" => {
@@ -2833,6 +2837,7 @@ fn save_image(gpu_state: &GPUState, view: &Texture2D, name: &str) {
     img.save(name).unwrap();
 }
 
+#[wasm_bindgen(start)]
 pub fn set_panic_hook() {
     // When the `console_error_panic_hook` feature is enabled, we can call the
     // `set_panic_hook` function at least once during initialization, and then
@@ -2842,7 +2847,7 @@ pub fn set_panic_hook() {
     // https://github.com/rustwasm/console_error_panic_hook#readme
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
-    alert("PANIC!");
+    //alert("PANIC!");
 }
 
 use wasm_bindgen::prelude::*;
@@ -2863,8 +2868,8 @@ pub fn greet(s: &str) {
     alert(&format!("Hello from guppy_rust, {}!", s));
 }
 
+#[derive(Clone, Debug)]
 struct BindingState {
-    mem: Vec<u32>,
     r_views: Vec<View>,
     rw_views: Vec<View>,
     samplers: Vec<Sampler>,
@@ -2878,15 +2883,15 @@ pub fn guppy_create_gpu_state(config_str: String) {
     let config: GPUConfig = serde_json::from_str(config_str.as_str()).unwrap();
     unsafe {
         g_bind_state = Some(BindingState {
-            mem: Vec::new(),
             r_views: Vec::new(),
             rw_views: Vec::new(),
             samplers: Vec::new(),
         });
-        for i in 0..16 {
-            g_bind_state.as_mut().unwrap().mem.push(0);
-        }
+        
         g_gpu_state = Some(Box::new(GPUState::new(&config)));
+        for i in 0..16 {
+            g_gpu_state.as_mut().unwrap().mem.push(0);
+        }
     }
 }
 
@@ -2897,16 +2902,25 @@ pub fn guppy_get_config() -> String {
 
 #[wasm_bindgen]
 pub fn guppy_dispatch(text: &str, group_size: u32, groups_count: u32) {
-    //alert(text);
-    let res = parse(text);
+    // alert("hello1");
+
+    let res = parse(text);;
     let program = Program { ins: res };
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+    let bind_state = unsafe { g_bind_state.as_mut().unwrap() };
+    alert(&format!(
+        "bind_state {:?}!",
+        bind_state
+    ));
     dispatch(
         gpu_state,
         &program,
-        vec![],
-        vec![],
-        vec![],
+        bind_state.r_views.clone(),
+        bind_state.rw_views.clone(),
+        vec![Sampler{
+            wrap_mode: WrapMode::WRAP,
+            sample_mode: SampleMode::BILINEAR,
+        }],
         group_size,
         groups_count,
     );
@@ -2941,6 +2955,25 @@ fn from_base64(base64: String) -> Vec<u8> {
 }
 
 #[wasm_bindgen]
+pub fn guppy_init_framebuffer(width: u32, height: u32) -> u32 {
+    let bind_state = unsafe { g_bind_state.as_mut().unwrap() };
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+
+    bind_state.rw_views.push(View::TEXTURE2D(Texture2D {
+        offset: gpu_state.mem.len() as u32 * 4,
+        pitch: width * 4,
+        width: width,
+        height: height,
+        format: TextureFormat::RGBA8_UNORM,
+    }));
+    for i in 0..width * height {
+        gpu_state.mem.push(0);
+    }
+
+    bind_state.rw_views.len() as u32 - 1
+}
+
+#[wasm_bindgen]
 pub fn guppy_put_image(base64: String) -> u32 {
     let bytes = std::io::Cursor::new(from_base64(base64));
     let decoder = png::Decoder::new(bytes);
@@ -2954,8 +2987,10 @@ pub fn guppy_put_image(base64: String) -> u32 {
     reader.next_frame(&mut image).unwrap();
     let bind_state = unsafe { g_bind_state.as_mut().unwrap() };
     assert_eq!(image.len() % 4, 0);
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+
     bind_state.r_views.push(View::TEXTURE2D(Texture2D {
-        offset: bind_state.mem.len() as u32 * 4,
+        offset: gpu_state.mem.len() as u32 * 4,
         pitch: info.width * 4,
         width: info.width,
         height: info.height,
@@ -2967,31 +3002,40 @@ pub fn guppy_put_image(base64: String) -> u32 {
         let b2 = image[i * 4 + 2];
         let b3 = image[i * 4 + 3];
         let val: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
-        bind_state.mem.push(val);
+        gpu_state.mem.push(val);
     }
-    alert(&format!(
-        "image is created! size: {} x {} first pixel: {:x}!",
-        info.width, info.height, bind_state.mem[64]
-    ));
+    // alert(&format!(
+    //     "image is created! size: {} x {} first pixel: {:x}!",
+    //     info.width, info.height, bind_state.mem[64]
+    // ));
 
     bind_state.r_views.len() as u32 - 1
 }
 
 #[wasm_bindgen]
-pub fn guppy_get_image(id: u32) -> String {
+pub fn guppy_get_image(id: u32, read: bool) -> String {
     let bind_state = unsafe { g_bind_state.as_mut().unwrap() };
-    let tex2d = match &bind_state.r_views[id as usize] {
-        View::TEXTURE2D(tex) => tex,
-        _ => std::panic!(),
+    let tex2d = if read {
+        match &bind_state.r_views[id as usize] {
+            View::TEXTURE2D(tex) => tex,
+            _ => std::panic!(),
+        }
+    } else {
+        match &bind_state.rw_views[id as usize] {
+            View::TEXTURE2D(tex) => tex,
+            _ => std::panic!(),
+        }
     };
     let mut buf: Vec<u8> = Vec::new();
     let format = match tex2d.format {
         TextureFormat::RGBA8_UNORM => TextureFormat::RGBA8_UNORM,
         _ => std::panic!(),
     };
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+
     for i in 0..tex2d.height {
         for j in 0..tex2d.width {
-            let pixel = bind_state.mem[((tex2d.offset + i * tex2d.pitch + j * 4) / 4) as usize];
+            let pixel = gpu_state.mem[((tex2d.offset + i * tex2d.pitch + j * 4) / 4) as usize];
             let b0 = ((pixel) & 0xff) as u8;
             let b1 = ((pixel >> 8) & 0xff) as u8;
             let b2 = ((pixel >> 16) & 0xff) as u8;
@@ -3005,8 +3049,9 @@ pub fn guppy_get_image(id: u32) -> String {
     let mut bytes: Vec<u8> = Vec::new();
     let encoder = image::png::PNGEncoder::new(&mut bytes);
     // png::Encoder::new(bytes, tex2d.width,tex2d.height);
-    encoder.encode(&buf, tex2d.width,tex2d.height, image::ColorType::RGBA(8))
-    .expect("error encoding png");
+    encoder
+        .encode(&buf, tex2d.width, tex2d.height, image::ColorType::RGBA(8))
+        .expect("error encoding png");
     //encode(&buf, tex2d.width,tex2d.height, png::ColorType::RGBA);
     encode(&bytes)
 }
@@ -3050,17 +3095,32 @@ mod tests {
     fn mem_dummy() {
         let res = parse(
             r"
-                mov r1.x, thread_id
-                mul.u32 r1.x, r1.x, u(4)
-                ld r2.xy, t0.xw, r1.x
-                add.u32 r1.y, r1.x, u(4)
-                ld r3.x, t0.x, r1.y
-                add.u32 r2.x, r2.x, r2.y
-                ;mov r2.x, r2.x
-                st u0.x, r1.x, r2.x
-
-                ret
-                ",
+ mov r0.xy, thread_id
+and r0.x, r0.x, u(63)
+div.u32 r0.y, r0.y, u(64)
+mov r0.zw, r0.xy
+utof r0.xy, r0.xy
+; add 0.5 to fit the center of the texel
+add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+; normalize coordinates
+div.f32 r0.xy, r0.xy, f2(64.0 64.0)
+; tx * 2.0 - 1.0
+mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
+sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
+; rotate with pi/4
+mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)
+add.f32 r5.x, r4.x, r4.y
+sub.f32 r5.y, r4.y, r4.x
+;mul.f32 r5.x, r5.x, f(2.0)
+mov r0.xy, r5.xy
+; texture fetch
+; coordinates are normalized
+; type conversion and coordinate conversion happens here
+sample r1.xyzw, t0.xyzw, s0, r0.xy
+; coordinates are u32 here(in texels)
+; type conversion needs to happen
+st u0.xyzw, r0.zw, r1.xyzw
+ret"
         );
         let config = GPUConfig {
             DRAM_latency: 300,
@@ -3080,25 +3140,52 @@ mod tests {
             ALU_pipe_len: 4,
         };
         let mut gpu_state = GPUState::new(&config);
-        gpu_state.mem = vec![
-            0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, // padding
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, // read buffer
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // write buffer
-        ];
+        let TEXTURE_SIZE = 8;
+        let AMP_K = 8;
+        {
+            let mut mem: Vec<u32> = Vec::new();
+            for i in 0..16 {
+                mem.push(0);
+            }
+            for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE) {
+                if i % (TEXTURE_SIZE / 4) == 0 || i % (TEXTURE_SIZE * 4) < TEXTURE_SIZE {
+                    mem.push(((i * TEXTURE_SIZE) << 16) | 0xff);
+                } else {
+                    mem.push(((i * TEXTURE_SIZE) << 8) | 0xff);
+                }
+            }
+            for i in 0..(AMP_K * AMP_K * TEXTURE_SIZE * TEXTURE_SIZE) {
+                mem.push(0);
+            }
+            mem[16] = 0xffffffff;
+            mem[17] = 0xff0000ff;
+            gpu_state.mem = mem;
+        }
         let program = Program { ins: res };
+        let out_view = Texture2D {
+            offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 4,
+            pitch: AMP_K * TEXTURE_SIZE * 4,
+            width: AMP_K * TEXTURE_SIZE,
+            height: AMP_K * TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
+        let in_view = Texture2D {
+            offset: 64,
+            pitch: TEXTURE_SIZE * 4,
+            width: TEXTURE_SIZE,
+            height: TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
         dispatch(
             &mut gpu_state,
             &program,
-            vec![View::BUFFER(Buffer {
-                offset: 16,
-                size: 20 * 4,
-            })],
-            vec![View::BUFFER(Buffer {
-                offset: 16 + 20 * 4,
-                size: 16 * 4,
-            })],
-            vec![],
-            16,
+            vec![View::TEXTURE2D(in_view.clone())],
+            vec![View::TEXTURE2D(out_view.clone())],
+            vec![Sampler {
+                wrap_mode: WrapMode::WRAP,
+                sample_mode: SampleMode::BILINEAR,
+            }],
+            32,
             1,
         );
         while clock(&mut gpu_state) {
