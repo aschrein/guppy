@@ -20,7 +20,8 @@ class App extends React.Component {
         super(props, context);
 
         this.onChange = this.onChange.bind(this);
-        this.onClick = this.onClick.bind(this);
+        this.Execute = this.Execute.bind(this);
+        this.PauseResume = this.PauseResume.bind(this);
         this.onResize = this.onResize.bind(this);
     }
 
@@ -39,7 +40,13 @@ class App extends React.Component {
         // this.refs.editor.resize();
     }
 
-    onClick() {
+    PauseResume() {
+        if (this.props.globals().wasm) {
+            this.props.globals().run = !this.props.globals().run;
+        }
+    }
+
+    Execute() {
         let globals = this.props.globals();
         if (this.props.globals().wasm) {
             this.props.globals().resetGPU();
@@ -53,7 +60,7 @@ class App extends React.Component {
                 config["group_size"],
                 config["groups_count"]
             );
-           
+
             this.props.globals().run = true;
         } else {
             console.log("[WARNING] wasm in null");
@@ -61,16 +68,16 @@ class App extends React.Component {
     }
     render() {
         let def_value =
-        "\n\
+            "\n\
 mov r0.xy, thread_id\n\
-and r0.x, r0.x, u(63)\n\
-div.u32 r0.y, r0.y, u(64)\n\
+and r0.x, r0.x, u(255)\n\
+div.u32 r0.y, r0.y, u(256)\n\
 mov r0.zw, r0.xy\n\
 utof r0.xy, r0.xy\n\
 ; add 0.5 to fit the center of the texel\n\
 add.f32 r0.xy, r0.xy, f2(0.5 0.5)\n\
 ; normalize coordinates\n\
-div.f32 r0.xy, r0.xy, f2(64.0 64.0)\n\
+div.f32 r0.xy, r0.xy, f2(256.0 256.0)\n\
 ; tx * 2.0 - 1.0\n\
 mul.f32 r0.xy, r0.xy, f2(2.0 2.0)\n\
 sub.f32 r0.xy, r0.xy, f2(1.0 1.0)\n\
@@ -90,7 +97,7 @@ st u0.xyzw, r0.zw, r1.xyzw\n\
 ret";
 
         let def_value_0 =
-        "\
+            "\
 mov r0.xy, thread_id\n\
 and r0.x, r0.x, u(63)\n\
 div.u32 r0.y, r0.y, u(64)\n\
@@ -140,8 +147,11 @@ LB_2:\n\
         this.text = def_value;
         return (
             <div className="ace_editor_container">
-                <button style={{ margin: 10 }} onClick={this.onClick}>
+                <button style={{ margin: 10 }} onClick={this.Execute}>
                     Execute
+                </button>
+                <button style={{ margin: 10 }} onClick={this.PauseResume}>
+                    Pause/Resume
                 </button>
                 <AceEditor
                     value={def_value}
@@ -178,7 +188,7 @@ class Parameters extends React.Component {
     onChange(key, value, parent, data) {
         console.log("onchange", key, value);
         this.props.globals().gpuConfig[key] = value;
-        
+
 
     }
 
@@ -373,20 +383,22 @@ class CanvasComponent extends React.Component {
 class GoldenLayoutWrapper extends React.Component {
     timer() {
         if (this.globals.wasm && this.globals.run) {
-            if (!this.globals.wasm.guppy_clock()) {
-                this.globals.run = false;
-            } else {
-                this.globals.active_mask_history.push(this.globals.wasm.guppy_get_active_mask());
-                this.globals.alu_active_history.push(this.globals.wasm.guppy_get_gpu_metric("ALU active"));
-                //if (this.globals.updateCanvas)
-                this.globals.updateMemory();
-                this.globals.updateCanvas();
+            for (var i = 0; i < this.globals.dispatchConfig["cycles_per_iter"]; i++) {
+                if (!this.globals.wasm.guppy_clock()) {
+                    this.globals.run = false;
+                } else {
+                    this.globals.active_mask_history.push(this.globals.wasm.guppy_get_active_mask());
+                    this.globals.alu_active_history.push(this.globals.wasm.guppy_get_gpu_metric("ALU active"));
+                    //if (this.globals.updateCanvas)
+                    this.globals.updateMemory();
+                    this.globals.updateCanvas();
+                }
             }
         }
     }
     componentDidMount() {
         this.globals = {};
-        this.globals.dispatchConfig = { "group_size": 32, "groups_count": 2 };
+        this.globals.dispatchConfig = { "group_size": 32, "groups_count": 2, "cycles_per_iter": 4 };
         this.globals.gpuConfig = {
             "DRAM_latency": 4,
             "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 4, "L2_size": 16384, "L2_latency": 4, "sampler_cache_size": 1024,

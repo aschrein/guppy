@@ -3096,14 +3096,14 @@ mod tests {
         let res = parse(
             r"
  mov r0.xy, thread_id
-and r0.x, r0.x, u(63)
-div.u32 r0.y, r0.y, u(64)
+and r0.x, r0.x, u(255)
+div.u32 r0.y, r0.y, u(256)
 mov r0.zw, r0.xy
 utof r0.xy, r0.xy
 ; add 0.5 to fit the center of the texel
 add.f32 r0.xy, r0.xy, f2(0.5 0.5)
 ; normalize coordinates
-div.f32 r0.xy, r0.xy, f2(64.0 64.0)
+div.f32 r0.xy, r0.xy, f2(256.0 256.0)
 ; tx * 2.0 - 1.0
 mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
 sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
@@ -3140,8 +3140,8 @@ ret"
             ALU_pipe_len: 4,
         };
         let mut gpu_state = GPUState::new(&config);
-        let TEXTURE_SIZE = 8;
-        let AMP_K = 8;
+        let TEXTURE_SIZE = 64;
+        let AMP_K = 4;
         {
             let mut mem: Vec<u32> = Vec::new();
             for i in 0..16 {
@@ -3186,10 +3186,10 @@ ret"
                 sample_mode: SampleMode::BILINEAR,
             }],
             32,
-            1,
+            (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
         while clock(&mut gpu_state) {
-            println!("{:?}", gpu_state.get_alu_active());
+            //println!("{:?}", gpu_state.get_alu_active());
         }
     }
 
