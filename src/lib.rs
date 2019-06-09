@@ -221,6 +221,7 @@ struct WaveState {
     program: Option<Rc<Program>>,
     // Next instruction
     pc: u32,
+    clock_counter: u32,
     // Determines temporarly disabled lanes
     exec_mask: ExecMask,
     // Determines dead lanes
@@ -265,6 +266,7 @@ impl WaveState {
             group_size: 0,
             program: None,
             pc: 0,
+            clock_counter: 0,
             exec_mask: Vec::new(),
             live_mask: Vec::new(),
             exec_mask_stack: Vec::new(),
@@ -412,6 +414,7 @@ impl WaveState {
         self.exec_mask = exec_mask;
         self.stalled = false;
         self.pc = 0;
+        self.clock_counter = 0;
         self.wave_id = wave_id;
         self.group_id = group_id;
         self.group_size = group_size;
@@ -807,7 +810,11 @@ impl GPUState {
             [req.req.reg_row as usize][req.req.reg_col as usize];
         reg.locked = false;
         let u32val = castToValue(&final_val);
-        applyWriteSwizzle(&mut reg.val, &applyReadSwizzle(&u32val, &req.req.read_comps), &req.req.write_comps);
+        applyWriteSwizzle(
+            &mut reg.val,
+            &applyReadSwizzle(&u32val, &req.req.read_comps),
+            &req.req.write_comps,
+        );
     }
     fn sampler_put_line(&mut self, cu_id: u32, line: &CacheLine) {
         let requests = self.cus[cu_id as usize]
@@ -1652,7 +1659,8 @@ fn dispatch(
     }
 }
 
-fn clock(gpu_state: &mut GPUState) -> bool {
+fn clock(gpu_state: &mut GPUState) -> Option<Vec<Event>> {
+    let mut events: Vec<Event> = Vec::new();
     // @Dispatch work
     {
         // @TODO: Remove
@@ -1730,6 +1738,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
             for fe in &mut cu.fes {
                 for (wave_id, wave) in &mut cu.waves.iter_mut().enumerate() {
                     if wave.enabled && !wave.has_been_dispatched && !wave.stalled {
+                        wave.clock_counter += 1;
                         // At least we have some wave that must be doing something
                         didSomeWork = true;
                         // This wave might be stalled because of instruction dependencies
@@ -1843,6 +1852,7 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 continue;
                             }
                             wave.enabled = false;
+                            events.push(Event::WAVE_RETIRED((cu_id as u32, wave_id as u32)));
                         } else if let InstTy::LD = inst.ty {
                             let mut wave_gather_reqs: Vec<LDReq> = Vec::new();
                             let addr = wave.getValues(&inst.ops[2]);
@@ -2196,6 +2206,9 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                     }
 
                                     wave.enabled = false;
+                                    events
+                                        .push(Event::WAVE_RETIRED((cu_id as u32, wave_id as u32)));
+
                                     // Wave has been retired
                                 }
                             } else {
@@ -2325,7 +2338,11 @@ fn clock(gpu_state: &mut GPUState) -> bool {
     gpu_state.l2_clock();
     gpu_state.mem_clock();
     gpu_state.clock_counter += 1;
-    didSomeWork
+    if didSomeWork {
+        Some(events)
+    } else {
+        None
+    }
 }
 
 #[macro_use]
@@ -2763,6 +2780,7 @@ fn getLatency(ty: &InstTy) -> u32 {
     }
 }
 
+#[derive(Clone, Debug)]
 enum Event {
     GROUP_DISPATCHED((u32, Vec<(u32, u32)>)),
     // (cu_id, wave_id)
@@ -2903,7 +2921,7 @@ pub fn guppy_get_gpu_metric(name: String) -> f64 {
 #[wasm_bindgen]
 pub fn guppy_clock() -> bool {
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
-    clock(gpu_state)
+    clock(gpu_state).is_some()
 }
 
 extern crate base64;
@@ -3060,53 +3078,53 @@ mod tests {
     fn mem_dummy() {
         let res = parse(
             r"
- mov r0.xy, thread_id
-and r0.x, r0.x, u(255)
-div.u32 r0.y, r0.y, u(256)
-mov r0.zw, r0.xy
-utof r0.xy, r0.xy
-; add 0.5 to fit the center of the texel
-add.f32 r0.xy, r0.xy, f2(0.5 0.5)
-; normalize coordinates
-div.f32 r0.xy, r0.xy, f2(256.0 256.0)
-; tx * 2.0 - 1.0
-mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
-sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
-; rotate with pi/4
-mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)
-add.f32 r5.x, r4.x, r4.y
-sub.f32 r5.y, r4.y, r4.x
-;mul.f32 r5.x, r5.x, f(2.0)
-mov r0.xy, r5.xy
-; texture fetch
-; coordinates are normalized
-; type conversion and coordinate conversion happens here
-sample r1.xyzw, t0.xyzw, s0, r0.xy
-; coordinates are u32 here(in texels)
-; type conversion needs to happen
-st u0.xyzw, r0.zw, r1.xyzw
-ret",
+            mov r0.xy, thread_id
+            and r0.x, r0.x, u(1023)
+            div.u32 r0.y, r0.y, u(1024)
+            mov r0.zw, r0.xy
+            utof r0.xy, r0.xy
+            ; add 0.5 to fit the center of the texel
+            add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+            ; normalize coordinates
+            div.f32 r0.xy, r0.xy, f2(1024.0 1024.0)
+            ; tx * 2.0 - 1.0
+            mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
+            sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
+            ; rotate with pi/4
+            mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)
+            add.f32 r5.x, r4.x, r4.y
+            sub.f32 r5.y, r4.y, r4.x
+            ;mul.f32 r5.x, r5.x, f(2.0)
+            mov r0.xy, r5.xy
+            ; texture fetch
+            ; coordinates are normalized
+            ; type conversion and coordinate conversion happens here
+            sample r1.xyzw, t0.xyzw, s0, r0.xy
+            ; coordinates are u32 here(in texels)
+            ; type conversion needs to happen
+            st u0.xyzw, r0.zw, r1.xyzw
+            ret",
         );
         let config = GPUConfig {
-            DRAM_latency: 300,
-            DRAM_bandwidth: 256,
+            DRAM_latency: 1,
+            DRAM_bandwidth: 2048,
             L1_size: 1 << 14,
-            L1_latency: 100,
+            L1_latency: 1,
             L2_size: 1 << 15,
-            L2_latency: 200,
+            L2_latency: 1,
             sampler_cache_size: 1 << 10,
-            sampler_latency: 100,
+            sampler_latency: 1,
             VGPRF_per_pe: 8,
-            wave_size: 16,
-            CU_count: 2,
+            wave_size: 32,
+            CU_count: 12,
             ALU_per_cu: 2,
-            waves_per_cu: 16,
+            waves_per_cu: 4,
             fd_per_cu: 4,
-            ALU_pipe_len: 4,
+            ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
         let TEXTURE_SIZE = 64;
-        let AMP_K = 4;
+        let AMP_K = 16;
         {
             let mut mem: Vec<u32> = Vec::new();
             for i in 0..16 {
@@ -3151,22 +3169,42 @@ ret",
                 sample_mode: SampleMode::BILINEAR,
             }],
             32,
-            1,//(TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
+            (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
-        while clock(&mut gpu_state) {
-            println!(
-                            "{:?},",
-                            gpu_state.cus[0].sampler.free_reqs.len()
-                            // gpu_state.cus[0].waves[1].vgprfs[1].iter().map(|reg| {
-                            //             if reg.locked {
-                            //                 1
-                            //             } else {
-                            //                 0
-                            //             }
-                            //         }).collect::<Vec<_>>()
-                        );
+        while let Some(events) = clock(&mut gpu_state) {
+            if events.len() != 0 {
+                // println!("{:?}", events);
+                //}
+
+                for event in &events {
+                    match event {
+                        Event::WAVE_RETIRED((cu_id, wave_id)) => {
+                            print!(
+                                " clocks:{}",
+                                gpu_state.cus[*cu_id as usize].waves[*wave_id as usize]
+                                    .clock_counter
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                println!();
+            }
+            // println!(
+            //                 "{:?},",
+            //                 gpu_state.cus[0].sampler.free_reqs.len()
+            //                 // gpu_state.cus[0].waves[1].vgprfs[1].iter().map(|reg| {
+            //                 //             if reg.locked {
+            //                 //                 1
+            //                 //             } else {
+            //                 //                 0
+            //                 //             }
+            //                 //         }).collect::<Vec<_>>()
+            //             );
             //println!("{:?}", gpu_state.get_alu_active());
         }
+        save_image(&gpu_state, &in_view, "in.png");
+        save_image(&gpu_state, &out_view, "out.png");
     }
 
     #[test]
@@ -3268,13 +3306,11 @@ ret",
             32,
             (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
-        while clock(&mut gpu_state) {
+        while clock(&mut gpu_state).is_some() {
             let wave = &gpu_state.cus[0].waves[0];
             //println!("{:?}", wave.program.as_ref().unwrap().ins[wave.pc as usize]);
         }
 
-        // save_image(&gpu_state, &in_view, "in.png");
-        // save_image(&gpu_state, &out_view, "out.png");
         let line = {
             let mut vec: Vec<Value> = Vec::new();
             for j in 0..out_view.width {
@@ -3434,7 +3470,7 @@ ret",
             1,
         );
         let mut history: Vec<String> = Vec::new();
-        while clock(&mut gpu_state) {
+        while clock(&mut gpu_state).is_some() {
             // "\"{:?}:<{:?}|{:?}|{:?}>\",",
 
             let line = format!(
@@ -3535,7 +3571,7 @@ ret",
             128,
             ITEMS / 128,
         );
-        while clock(&mut gpu_state) {
+        while clock(&mut gpu_state).is_some() {
             // println!(
             //     "{:?}:<{:?}|{:?}|{:?}>",
             //     gpu_state.cus[0].waves[0].pc,
@@ -3607,7 +3643,7 @@ ret",
             16,
             1,
         );
-        while clock(&mut gpu_state) {}
+        while clock(&mut gpu_state).is_some() {}
         assert_eq!(
             vec![3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 13, 14, 15],
             gpu_state.cus[0].waves[0].vgprfs[2]
@@ -3665,7 +3701,7 @@ ret",
         let mut gpu_state = GPUState::new(&config);
         let program = Program { ins: res };
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 32, 1);
-        while clock(&mut gpu_state) {}
+        while clock(&mut gpu_state).is_some() {}
         assert_eq!(
             vec![
                 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5,
@@ -3730,7 +3766,7 @@ ret",
         };
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 16, 1);
         let mut mask_history: Vec<String> = Vec::new();
-        while clock(&mut gpu_state) {
+        while clock(&mut gpu_state).is_some() {
             for cu in &gpu_state.cus {
                 for wave in &cu.waves {
                     if wave.enabled {
@@ -3927,7 +3963,7 @@ ret",
         };
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 8, 1);
         let mut mask_history: Vec<Vec<u32>> = Vec::new();
-        while clock(&mut gpu_state) {
+        while clock(&mut gpu_state).is_some() {
             for cu in &gpu_state.cus {
                 for wave in &cu.waves {
                     if wave.enabled {
@@ -4037,7 +4073,7 @@ ret",
             ),
         };
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 4, 1);
-        while clock(&mut gpu_state) {
+        while clock(&mut gpu_state).is_some() {
             // @DEAD
             // for cu in &gpu_state.cus {
             //     for alu in &cu.valus {
@@ -4054,7 +4090,7 @@ ret",
         assert_eq!(11, gpu_state.clock_counter);
         let mut gpu_state = GPUState::new(&config);
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 8, 1);
-        while clock(&mut gpu_state) {}
+        while clock(&mut gpu_state).is_some() {}
         assert_eq!(14, gpu_state.clock_counter);
 
         // @DEAD
@@ -4120,7 +4156,7 @@ ret",
         let mut gpu_state = GPUState::new(&config);
         let program = Program { ins: res };
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 8, 1);
-        while clock(&mut gpu_state) {}
+        while clock(&mut gpu_state).is_some() {}
         assert_eq!(
             vec![
                 [666.0, 666.0, 0.0, 0.0],
@@ -4692,6 +4728,6 @@ ret",
 
         // @Test
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 4, 1);
-        while clock(&mut gpu_state) {}
+        while clock(&mut gpu_state).is_some() {}
     }
 }

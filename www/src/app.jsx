@@ -337,10 +337,10 @@ class CanvasComponent extends React.Component {
                         } else if (history[i][j] == 4) {
                             this.ctx.fillStyle = "red";
                         }
-                        this.ctx.fillRect(x, y, 2, 2);
-                        y += 2;
+                        this.ctx.fillRect(x, y, 1, 1);
+                        y += 1;
                     }
-                    x += 2;
+                    x += 1;
                 }
                 this.neededWidth = Math.max(this.neededWidth, x);
             }
@@ -367,9 +367,9 @@ class CanvasComponent extends React.Component {
                             this.ctx.fillStyle = "black";
                         }
                         this.ctx.fillRect(x, y, 2, 2);
-                        y += 2;
+                        y += 1;
                     }
-                    x += 2;
+                    x += 1;
                 }
                 this.neededWidth = Math.max(this.neededWidth, x);
             }
@@ -398,11 +398,15 @@ class GoldenLayoutWrapper extends React.Component {
     }
     componentDidMount() {
         this.globals = {};
-        this.globals.dispatchConfig = { "group_size": 32, "groups_count": 2, "cycles_per_iter": 4 };
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 2048, "cycles_per_iter": 4 };
         this.globals.gpuConfig = {
-            "DRAM_latency": 4,
-            "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 4, "L2_size": 16384, "L2_latency": 4, "sampler_cache_size": 1024,
-            "sampler_latency": 4, "VGPRF_per_pe": 8, "wave_size": 32, "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 2, "ALU_pipe_len": 1
+            "DRAM_latency": 1,
+            "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 1,
+            "L2_size": 4 * 1024 * 1024, "L2_latency": 1, "sampler_cache_size": 1024 * 1024,
+            "sampler_latency": 1, "VGPRF_per_pe": 8, "wave_size": 32,
+            "CU_count": 12, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "ALU_pipe_len": 1
         };
         this.globals.wasm = null;
         this.globals.r_images = [];
