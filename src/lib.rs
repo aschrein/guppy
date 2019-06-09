@@ -496,7 +496,8 @@ struct SampleReq {
     wave_id: u32,
     reg_row: u32,
     reg_col: u32,
-    comp: u32,
+    read_comps: [Component; 4],
+    write_comps: [Component; 4],
     u: f32,
     v: f32,
     texture: u32,
@@ -517,6 +518,7 @@ struct SamplerState {
     cache_table: CacheTable,
     reqs: Vec<Option<SampleReqWrap>>,
     free_reqs: Vec<u32>,
+    wait_reqs: HashSet<u32>,
     // mem_offset -> [req_id]
     // coalesced request table
     gather_queue: HashMap<u32, HashSet<u32>>,
@@ -536,12 +538,15 @@ impl SamplerState {
             cache_table: CacheTable::new(gpu_config.sampler_cache_size / 64, 2),
             reqs: reqs,
             free_reqs: free_reqs,
+            wait_reqs: HashSet::new(),
             gather_queue: HashMap::new(),
         }
     }
     fn alloc_id(&mut self) -> Option<u32> {
         if self.free_reqs.len() != 0 {
-            Some(self.free_reqs.pop().unwrap())
+            let id = self.free_reqs.pop().unwrap();
+            self.wait_reqs.insert(id);
+            Some(id)
         } else {
             None
         }
@@ -779,7 +784,8 @@ impl GPUState {
             .unwrap();
         self.cus[cu_id as usize].sampler.reqs[req_id as usize] = None;
         self.cus[cu_id as usize].sampler.free_reqs.push(req_id);
-        let mut final_val = 0.0;
+        // let mut final_val = 0.0;
+        let mut final_val: FValue = [0.0, 0.0, 0.0, 0.0];
         let texture = match &self.cus[req.req.cu_id as usize].waves[req.req.wave_id as usize]
             .r_views[req.req.texture as usize]
         {
@@ -788,20 +794,20 @@ impl GPUState {
         };
 
         for i in 0..4 {
-            let val: f32 = match texture.format {
-                TextureFormat::RGBA8_UNORM => {
-                    ((req.values[i].2.unwrap() >> ((3 - req.req.comp) * 8)) & 0xff) as f32 / 255.0
-                }
-                _ => std::panic!(""),
-            };
-            final_val += val * req.values[i].1;
+            for j in 0..4 {
+                final_val[j] += match texture.format {
+                    TextureFormat::RGBA8_UNORM => {
+                        ((req.values[i].2.unwrap() >> ((3 - j) * 8)) & 0xff) as f32 / 255.0
+                    }
+                    _ => std::panic!(""),
+                } * req.values[i].1;
+            }
         }
         let reg = &mut self.cus[cu_id as usize].waves[req.req.wave_id as usize].vgprfs
-            [req.req.reg_row as usize][(req.req.reg_col / 4) as usize];
+            [req.req.reg_row as usize][req.req.reg_col as usize];
         reg.locked = false;
-        reg.val[(req.req.reg_col % 4) as usize] =
-            unsafe { std::mem::transmute_copy::<f32, u32>(&final_val) };
-        //[(req.req.reg_col % 4) as usize] = 0
+        let u32val = castToValue(&final_val);
+        applyWriteSwizzle(&mut reg.val, &applyReadSwizzle(&u32val, &req.req.read_comps), &req.req.write_comps);
     }
     fn sampler_put_line(&mut self, cu_id: u32, line: &CacheLine) {
         let requests = self.cus[cu_id as usize]
@@ -940,22 +946,22 @@ impl GPUState {
     }
     fn sampler_clock(&mut self, cu_id: u32) {
         let mut new_ready_reqs: Vec<u32> = Vec::new();
+        let wait_reqs = self.cus[cu_id as usize].sampler.wait_reqs.clone();
         // split lists
-        for (i, req) in self.cus[cu_id as usize].sampler.reqs.iter_mut().enumerate() {
-            match req {
-                Some(req) => {
-                    if req.timer == 1 {
-                        new_ready_reqs.push(i as u32);
-                    }
-                    req.timer = if req.timer != 0 { req.timer - 1 } else { 0 };
-                }
-                _ => {}
+        for &req_id in &wait_reqs {
+            let req = self.cus[cu_id as usize].sampler.reqs[req_id as usize]
+                .as_mut()
+                .unwrap();
+            if req.timer == 1 {
+                new_ready_reqs.push(req_id);
             }
+            req.timer = if req.timer != 0 { req.timer - 1 } else { 0 };
         }
 
         let mut missed_pages: Vec<(u32, u32)> = Vec::new();
         // Try to serve ready requests
         for req_id in new_ready_reqs {
+            self.cus[cu_id as usize].sampler.wait_reqs.remove(&req_id);
             let mut req = self.cus[cu_id as usize].sampler.reqs[req_id as usize]
                 .clone()
                 .unwrap();
@@ -1903,9 +1909,9 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 _ => std::panic!(""),
                             };
                             // let sampler_id = wave.samplers[sampler_id as usize].clone();
-                            let texture_id = match &inst.ops[1] {
+                            let (texture_id, read_comps) = match &inst.ops[1] {
                                 Operand::RMemory(rm) => match &wave.r_views[rm.id as usize] {
-                                    View::TEXTURE2D(tex) => rm.id,
+                                    View::TEXTURE2D(tex) => (rm.id, &rm.comps),
                                     _ => std::panic!(""),
                                 },
                                 _ => std::panic!(""),
@@ -1920,24 +1926,18 @@ fn clock(gpu_state: &mut GPUState) -> bool {
                                 for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate()
                                 {
                                     if wave.exec_mask[i] {
-                                        let mut reg_cols: Value = [0, 0, 0, 0];
-                                        applyWriteSwizzle(&mut reg_cols, &[1, 2, 3, 4], &dst.comps);
-                                        for j in 0..4 {
-                                            if reg_cols[j] == 0 {
-                                                continue;
-                                            }
-                                            wave_sample_request.push(SampleReq {
-                                                cu_id: cu_id as u32,
-                                                wave_id: wave_id as u32,
-                                                reg_row: dst.id,
-                                                reg_col: i as u32 * 4 + reg_cols[j] - 1,
-                                                comp: j as u32,
-                                                u: addresses[i][0],
-                                                v: addresses[i][1],
-                                                texture: texture_id,
-                                                sampler: sampler_id,
-                                            });
-                                        }
+                                        wave_sample_request.push(SampleReq {
+                                            cu_id: cu_id as u32,
+                                            wave_id: wave_id as u32,
+                                            reg_row: dst.id,
+                                            reg_col: i as u32,
+                                            read_comps: read_comps.clone(),
+                                            write_comps: dst.comps.clone(),
+                                            u: addresses[i][0],
+                                            v: addresses[i][1],
+                                            texture: texture_id,
+                                            sampler: sampler_id,
+                                        });
                                         item.locked = true;
                                     }
                                 }
@@ -3206,9 +3206,9 @@ ret",
             DRAM_bandwidth: 64 * 32,
             L1_size: 1 << 10,
             L1_latency: 4,
-            L2_size: 1 << 14,
+            L2_size: 1 << 20,
             L2_latency: 4,
-            sampler_cache_size: 1 << 10,
+            sampler_cache_size: 1 << 20,
             sampler_latency: 4,
             VGPRF_per_pe: 8,
             wave_size: 32,
