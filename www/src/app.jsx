@@ -281,8 +281,8 @@ class CanvasComponent extends React.Component {
 
     constructor(props, context) {
         super(props, context);
-        this.neededWidth = 512;
-        this.neededHeight = 512;
+        this.neededWidth = 4 * 1024;
+        this.neededHeight = 1024;
         this.updateCanvas = this.updateCanvas.bind(this);
         this.onResize = this.onResize.bind(this);
         this.scheduleDraw = this.scheduleDraw.bind(this);
@@ -296,7 +296,7 @@ class CanvasComponent extends React.Component {
         this.props.glContainer.on('resize', this.onResize);
         this.globals = this.props.globals;
         this.globals().updateCanvas = this.updateCanvas;
-        
+
         this.updateCanvas();
     }
 
@@ -323,6 +323,16 @@ class CanvasComponent extends React.Component {
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
         var x = 0;
         var y = 0;
+        {
+            var canvas = this.ctx;
+            canvas.font = "14px Monaco, monospace";
+            var welcomeMessage = "(white, black, grey, blue, red) = (active, inactive, disabled, stalled, not enough resources)";
+            canvas.textAlign = "start";
+            canvas.textBaseline = "top";
+            canvas.fillStyle = "#ffffff";
+            canvas.fillText(welcomeMessage, x, y);
+            y += 16;
+        }
         if (this.globals().active_mask_history) {
             let history = this.globals().active_mask_history;
             if (history.length > 0) {
@@ -332,7 +342,7 @@ class CanvasComponent extends React.Component {
                 canvas.textAlign = "start";
                 canvas.textBaseline = "top";
                 canvas.fillStyle = "#ffffff";
-                canvas.fillText(welcomeMessage, 0, y);
+                canvas.fillText(welcomeMessage, x, y);
                 // console.log('updateCanvas', history[0].length);
 
                 var exec_mask_offset = y + 16;
@@ -390,13 +400,23 @@ class CanvasComponent extends React.Component {
                 this.neededWidth = Math.max(this.neededWidth, x);
             }
         }
+        {
+            var canvas = this.ctx;
+            canvas.font = "14px Monaco, monospace";
+            var welcomeMessage = "(r, g, b) = (hits, misses, evictions)";
+            canvas.textAlign = "start";
+            canvas.textBaseline = "top";
+            canvas.fillStyle = "#ffffff";
+            canvas.fillText(welcomeMessage, 0, y + 16);
+            y += 16;
+        }
         if (this.globals().l2_metric_history) {
             let history = this.globals().l2_metric_history;
             if (history.length > 0) {
-                
+
                 var canvas = this.ctx;
                 canvas.font = "14px Monaco, monospace";
-                var welcomeMessage = "L2 metric history";
+                var welcomeMessage = "L2$";
                 canvas.textAlign = "start";
                 canvas.textBaseline = "top";
                 canvas.fillStyle = "#ffffff";
@@ -428,9 +448,9 @@ class CanvasComponent extends React.Component {
                             b = 255.0;
                         }
                         this.ctx.fillStyle = 'rgb(' +
-                        Math.floor(r) + ', ' +
-                        Math.floor(g) + ', ' +
-                        Math.floor(b) + ')';
+                            Math.floor(r) + ', ' +
+                            Math.floor(g) + ', ' +
+                            Math.floor(b) + ')';
                         this.ctx.fillRect(x, y, 1, 1);
                         y += 1;
                     }
@@ -442,10 +462,10 @@ class CanvasComponent extends React.Component {
         if (this.globals().samplers_metric_history) {
             let history = this.globals().samplers_metric_history;
             if (history.length > 0) {
-                
+
                 var canvas = this.ctx;
                 canvas.font = "14px Monaco, monospace";
-                var welcomeMessage = "Samplers metric history";
+                var welcomeMessage = "Samplers $";
                 canvas.textAlign = "start";
                 canvas.textBaseline = "top";
                 canvas.fillStyle = "#ffffff";
@@ -477,9 +497,9 @@ class CanvasComponent extends React.Component {
                             b = 255.0;
                         }
                         this.ctx.fillStyle = 'rgb(' +
-                        Math.floor(r) + ', ' +
-                        Math.floor(g) + ', ' +
-                        Math.floor(b) + ')';
+                            Math.floor(r) + ', ' +
+                            Math.floor(g) + ', ' +
+                            Math.floor(b) + ')';
                         this.ctx.fillRect(x, y, 1, 1);
                         y += 1;
                     }
@@ -492,7 +512,7 @@ class CanvasComponent extends React.Component {
     render() {
         return <div>
             <button style={{ margin: 10 }} onClick={this.scheduleDraw}>
-                    Draw
+                Draw
             </button>
             <canvas ref="canvas" /> </div>;
     }
@@ -526,14 +546,15 @@ class GoldenLayoutWrapper extends React.Component {
     componentDidMount() {
         this.globals = {};
         this.globals.dispatchConfig = {
-            "group_size": 32, "groups_count": 2048, "cycles_per_iter": 4 };
+            "group_size": 32, "groups_count": 2048, "cycles_per_iter": 1
+        };
         this.globals.gpuConfig = {
-            "DRAM_latency": 16,
-            "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 4,
-            "L2_size": 8 * 1024, "L2_latency": 8, "sampler_cache_size": 4 * 1024,
-            "sampler_latency": 4, "VGPRF_per_pe": 8, "wave_size": 32,
-            "CU_count": 4, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
-            "ALU_pipe_len": 2
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 4 * 64, "L1_size": 1024, "L1_latency": 8,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 8, "VGPRF_per_pe": 8, "wave_size": 32,
+            "CU_count": 4, "ALU_per_cu": 1, "waves_per_cu": 4, "fd_per_cu": 1,
+            "ALU_pipe_len": 4
         };
         this.globals.wasm = null;
         this.globals.r_images = [];
@@ -547,36 +568,44 @@ class GoldenLayoutWrapper extends React.Component {
         const config = {
             content: [{
                 type: 'row',
-                content: [{
-                    type: 'react-component',
-                    component: 'TextEditor',
-                    title: 'TextEditor',
-                    props: { globals: () => this.globals }
+                content: [
+                    {
+                        type: 'column',
+                        content: [
+                            {
+                                type: 'react-component',
+                                component: 'TextEditor',
+                                title: 'TextEditor',
+                                props: { globals: () => this.globals }
 
-                }, {
-                    type: 'react-component',
-                    component: 'Canvas',
-                    title: 'Canvas',
-                    props: { globals: () => this.globals }
+                            },
+                            {
+                                type: 'row',
+                                content: [
+                                    {
+                                        type: 'react-component',
+                                        component: 'Parameters',
+                                        title: 'Parameters',
+                                        props: { globals: () => this.globals }
+                                    },
+                                    {
+                                        type: 'react-component',
+                                        component: 'Memory',
+                                        title: 'Memory',
+                                        props: { globals: () => this.globals }
+                                    }
+                                ]
+                            }
 
-                },
-                {
-                    type: 'column',
-                    content: [
-                        {
-                            type: 'react-component',
-                            component: 'Parameters',
-                            title: 'Parameters',
-                            props: { globals: () => this.globals }
-                        },
-                        {
-                            type: 'react-component',
-                            component: 'Memory',
-                            title: 'Memory',
-                            props: { globals: () => this.globals }
-                        }
-                    ]
-                }
+                        ]
+                    }
+                    , {
+                        type: 'react-component',
+                        component: 'Canvas',
+                        title: 'Canvas',
+                        props: { globals: () => this.globals }
+
+                    },
                 ]
             }]
         };

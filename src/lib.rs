@@ -530,11 +530,11 @@ struct SamplerState {
 impl SamplerState {
     fn new(gpu_config: &GPUConfig) -> SamplerState {
         let mut reqs: Vec<Option<SampleReqWrap>> = Vec::new();
-        for i in 0..1024 {
+        for i in 0..gpu_config.wave_size * gpu_config.waves_per_cu {
             reqs.push(None);
         }
         let mut free_reqs: Vec<u32> = Vec::new();
-        for i in 0..1024 {
+        for i in 0..gpu_config.wave_size * gpu_config.waves_per_cu {
             free_reqs.push(i);
         }
         SamplerState {
@@ -672,6 +672,7 @@ struct L2CacheState {
     // wait_reqs: HashSet<u32>,
     // mem_offset -> cu_id -> timeout
     req_queue: HashMap<u32, HashMap<u32, u32>>,
+    wait_queue: HashMap<u32, HashSet<u32>>,
 }
 
 impl L1CacheState {
@@ -699,6 +700,7 @@ impl L2CacheState {
             // free_reqs: free_reqs,
             // wait_reqs: HashSet::new(),
             req_queue: HashMap::new(),
+            wait_queue: HashMap::new(),
         }
     }
     // fn alloc_id(&mut self) -> Option<u32> {
@@ -718,7 +720,10 @@ impl L2CacheState {
 struct SLMState {}
 
 // Fetch-Execute State
-struct FEState {}
+struct FEState {
+    // last dispatched wave
+    wave_id: u32,
+}
 
 struct CUState {
     // ongoing work, some waves might be disabled
@@ -754,9 +759,10 @@ impl CUState {
             });
         }
         salus.push(SALUState {});
+        assert!(config.fd_per_cu <= config.waves_per_cu);
         let mut fes: Vec<FEState> = Vec::new();
         for i in 0..config.fd_per_cu {
-            fes.push(FEState {});
+            fes.push(FEState { wave_id: i });
         }
         CUState {
             waves: waves,
@@ -1219,7 +1225,6 @@ impl GPUState {
         let page_size = 64 as u32;
         assert!(((page_size as i32) & -(page_size as i32)) == (page_size as i32));
         assert!((page_offset & (page_size - 1)) == 0);
-       
         if !self.l2.req_queue.contains_key(&page_offset) {
             self.l2.req_queue.insert(page_offset, HashMap::new());
         }
@@ -1230,10 +1235,11 @@ impl GPUState {
             .unwrap()
             .contains_key(&cu_id)
         {
-            self.l2.req_queue.get_mut(&page_offset).unwrap().insert(
-                cu_id,
-                self.config.L2_latency,
-            );
+            self.l2
+                .req_queue
+                .get_mut(&page_offset)
+                .unwrap()
+                .insert(cu_id, self.config.L2_latency);
         }
         true
     }
@@ -1259,20 +1265,8 @@ impl GPUState {
         }
         // Try to serve on ready requests
         for (cu_id, mem_offset) in ready_reqs {
-            let mut hit_line: Option<CacheLine> = None;
-            // Try to find the page in the table
-            for bin in &mut self.l2.cache_table.contents {
-                for line in bin {
-                    if let Some(line) = line {
-                        if line.address == mem_offset {
-                            // Cache hit
-                            hit_line = Some(line.clone());
-                        }
-                    }
-                }
-            }
             // Cache hit
-            if let Some(line) = hit_line {
+            if let Some(line) = self.l2.cache_table.getLine(mem_offset) {
                 self.l1_put_line(cu_id, &line);
                 self.sampler_put_line(cu_id, &line);
             }
@@ -1281,13 +1275,14 @@ impl GPUState {
                 // Emit the request to memory
                 self.loadMem(mem_offset, self.config.DRAM_latency);
                 // Put the request back to the queue
-                if !new_req_queue.contains_key(&mem_offset) {
-                    new_req_queue.insert(mem_offset, HashMap::new());
+                if !self.l2.wait_queue.contains_key(&mem_offset) {
+                    self.l2.wait_queue.insert(mem_offset, HashSet::new());
                 }
-                new_req_queue
+                self.l2
+                    .wait_queue
                     .get_mut(&mem_offset)
                     .unwrap()
-                    .insert(cu_id, 0);
+                    .insert(cu_id);
             }
         }
         self.l2.req_queue = new_req_queue;
@@ -1330,10 +1325,10 @@ impl GPUState {
         // }
     }
     fn l2_put_line(&mut self, line: &CacheLine) {
-        let requests = self.l2.req_queue.remove(&line.address);
+        let requests = self.l2.wait_queue.remove(&line.address);
         if let Some(requests) = requests {
             // Serve the request
-            for (cu_id, requests_id) in requests {
+            for cu_id in requests {
                 self.l1_put_line(cu_id, &line);
                 self.sampler_put_line(cu_id, &line);
             }
@@ -1368,6 +1363,627 @@ impl GPUState {
             delivered += 64;
         }
         self.ld_reqs = new_req_queue;
+    }
+    fn valu_clock(&mut self, cu_id: u32, valu_id: u32) {
+        let valu = &mut self.cus[cu_id as usize].valus[valu_id as usize];
+        let inst = valu.pop();
+        valu.active = false;
+        if inst.is_some() {
+            valu.active = true;
+            // didSomeWork = true;
+
+            let dispInst = inst.unwrap();
+            let mut wave = &mut self.cus[cu_id as usize].waves[dispInst.wave_id as usize];
+            let exec_mask = &dispInst.exec_mask.as_ref().unwrap();
+            let inst = dispInst.instr.unwrap();
+            match &inst.ty {
+                InstTy::ADD
+                | InstTy::SUB
+                | InstTy::MUL
+                | InstTy::DIV
+                | InstTy::LT
+                | InstTy::OR
+                | InstTy::AND => {
+                    let src1 = dispInst.src[0].as_ref().unwrap();
+                    let src2 = dispInst.src[1].as_ref().unwrap();
+                    let dst = match &inst.ops[0] {
+                        Operand::VRegister(dst) => dst,
+                        _ => std::panic!(""),
+                    };
+                    let result = {
+                        // @TODO: sub, div, mul
+                        src1.iter()
+                            .zip(src2.iter())
+                            // @TODO: Support different types
+                            .map(|(&x1, &x2)| match inst.interp {
+                                Interpretation::F32 => match inst.ty {
+                                    InstTy::ADD => AddF32(&x1, &x2),
+                                    InstTy::SUB => SubF32(&x1, &x2),
+                                    InstTy::MUL => MulF32(&x1, &x2),
+                                    InstTy::DIV => DivF32(&x1, &x2),
+                                    InstTy::LT => LTF32(&x1, &x2),
+                                    _ => std::panic!(""),
+                                },
+                                Interpretation::U32 => match inst.ty {
+                                    InstTy::ADD => AddU32(&x1, &x2),
+                                    InstTy::SUB => SubU32(&x1, &x2),
+                                    InstTy::MUL => MulU32(&x1, &x2),
+                                    InstTy::DIV => DivU32(&x1, &x2),
+                                    InstTy::LT => LTU32(&x1, &x2),
+                                    InstTy::OR => ORU32(&x1, &x2),
+                                    InstTy::AND => ANDU32(&x1, &x2),
+                                    _ => std::panic!(""),
+                                },
+
+                                _ => std::panic!(""),
+                            })
+                            .collect::<Vec<Value>>()
+                    };
+                    assert!(wave.vgprfs[dst.id as usize].len() == result.len());
+                    // Registers should be unlocked by this time
+                    for (i, item) in &mut wave.vgprfs[dst.id as usize].iter_mut().enumerate() {
+                        if exec_mask[i as usize] {
+                            applyWriteSwizzle(&mut item.val, &result[i], &dst.comps);
+                            item.locked = false;
+                        }
+                    }
+                }
+                InstTy::MOV | InstTy::UTOF => {
+                    let src1 = dispInst.src[0].as_ref().unwrap();
+                    let dst = match &inst.ops[0] {
+                        Operand::VRegister(dst) => dst,
+                        _ => std::panic!(""),
+                    };
+                    assert!(wave.vgprfs[dst.id as usize].len() == src1.len());
+                    // Registers should be unlocked by this time
+                    for (i, item) in &mut wave.vgprfs[dst.id as usize].iter_mut().enumerate() {
+                        if exec_mask[i as usize] {
+                            let src = match &inst.ty {
+                                InstTy::MOV => src1[i],
+                                InstTy::UTOF => U2F(&src1[i]),
+                                _ => std::panic!(""),
+                            };
+                            applyWriteSwizzle(&mut item.val, &src, &dst.comps);
+                            item.locked = false;
+                        }
+                    }
+                }
+                _ => std::panic!("unsupported {:?}", inst.ops[0]),
+            };
+        }
+    }
+    fn fetch_decode(
+        &mut self,
+        cu_id: u32,
+        wave_id: u32,
+        gather_reqs: &mut Vec<(u32, u32, Vec<LDReq>)>,
+        sample_reqs: &mut Vec<SampleReq>,
+    ) {
+        let (wave, sampler, valus) = {
+            let cu = &mut self.cus[cu_id as usize];
+            (
+                &mut cu.waves[wave_id as usize],
+                &mut cu.sampler,
+                &mut cu.valus,
+            )
+        };
+        if !wave.enabled {
+            return;
+        }
+        assert!(!wave.has_been_dispatched && !wave.stalled);
+        wave.clock_counter += 1;
+        // At least we have some wave that must be doing something
+        // didSomeWork = true;
+        // This wave might be stalled because of instruction dependencies
+        // or it might be waiting for the last instruction before retiring
+
+        let inst = &(*wave.program.as_ref().unwrap()).ins[wave.pc as usize];
+        let mut hasVRegOps = false;
+        let mut hasSRegOps = false;
+        let mut dispatchOnSampler = false;
+        let mut control_flow_cmd = false;
+        let mut has_dep = false;
+
+        // Do simple decoding and sanity checks
+        for op in &inst.ops {
+            match &op {
+                Operand::VRegister(vreg) => {
+                    for (i, item) in wave.vgprfs[vreg.id as usize].iter_mut().enumerate() {
+                        if wave.exec_mask[i] && item.locked {
+                            has_dep = true;
+                        }
+                    }
+                    hasVRegOps = true;
+                }
+                Operand::SRegister(sreg) => {
+                    if wave.sgprf[sreg.id as usize].locked {
+                        has_dep = true;
+                    }
+
+                    hasSRegOps = true;
+                }
+                Operand::Immediate(imm) => {}
+                Operand::Builtin(buiiltin) => {}
+                Operand::Label(label) => {}
+                Operand::Sampler(s) => {}
+                Operand::RMemory(mr) => {}
+                Operand::RWMemory(mr) => {}
+                Operand::NONE => {}
+                _ => {
+                    std::panic!("");
+                }
+            }
+        }
+        match &inst.ty {
+            InstTy::ADD
+            | InstTy::SUB
+            | InstTy::MUL
+            | InstTy::DIV
+            | InstTy::LT
+            | InstTy::OR
+            | InstTy::AND
+            | InstTy::ST
+            | InstTy::LD => {
+                inst.assertThreeOp();
+            }
+            InstTy::SAMPLE => {
+                inst.assertFourOp();
+            }
+            InstTy::BR_PUSH
+            | InstTy::POP_MASK
+            | InstTy::RET
+            | InstTy::PUSH_MASK
+            | InstTy::JMP
+            | InstTy::MASK_NZ => {
+                control_flow_cmd = true;
+            }
+            InstTy::MOV | InstTy::UTOF => {
+                inst.assertTwoOp();
+            }
+            _ => {
+                std::panic!("");
+            }
+        };
+        // @TODO: Make proper sanity checks
+
+        // @DEAD
+        // assert!(
+        //     vec![hasSRegOps, dispatchOnSampler, hasVRegOps]
+        //         .iter()
+        //         .filter(|&a| *a == true)
+        //         .collect::<Vec<&bool>>()
+        //         .len()
+        //         == 1 // Mixing different register types
+        //         || branchingOp
+        // );
+
+        // One of the operands is being locked
+        // Stall the wave
+        if has_dep {
+            wave.stalled = true;
+            return;
+        }
+        let has_locks = wave.vgprfs.iter().any(|x| x.iter().any(|y| y.locked));
+        if let InstTy::RET = inst.ty {
+            // If the wave has locks then stall on the return statement
+            // Don't increment the pc - we will hit the same instruction next cycle
+            if has_locks {
+                wave.stalled = true;
+                return;
+            }
+            wave.enabled = false;
+        // events.push(Event::WAVE_RETIRED((cu_id as u32, wave_id as u32)));
+        } else if let InstTy::LD = inst.ty {
+            let mut wave_gather_reqs: Vec<LDReq> = Vec::new();
+            let addr = wave.getValues(&inst.ops[2]);
+            if let Operand::VRegister(dst) = &inst.ops[0] {
+                for (i, item) in wave.vgprfs[dst.id as usize].iter().enumerate() {
+                    if wave.exec_mask[i] {
+                        let mem_val = match &inst.ops[1] {
+                            Operand::RMemory(rm) => {
+                                match &wave.r_views[rm.id as usize] {
+                                    View::BUFFER(buf) => {
+                                        let mem_offset = buf.offset + addr[i][0];
+                                        let val = applyReadSwizzle(
+                                            &[
+                                                mem_offset,
+                                                mem_offset + 4,
+                                                mem_offset + 8,
+                                                mem_offset + 12,
+                                            ],
+                                            &rm.comps,
+                                        );
+                                        // Boundary checks
+                                        for i in 0..4 {
+                                            if val[i] > 0 {
+                                                assert!(
+                                                    val[i] >= buf.offset
+                                                        && val[i] < buf.offset + buf.size
+                                                );
+                                            }
+                                        }
+                                        val
+                                    }
+                                    _ => std::panic!(""),
+                                }
+                            }
+                            _ => std::panic!(""),
+                        };
+                        let mut address: Value = [0, 0, 0, 0];
+                        applyWriteSwizzle(&mut address, &mem_val, &dst.comps);
+                        for (j, &comp) in address.iter().enumerate() {
+                            if comp != 0 {
+                                // Align at dword
+                                assert!(comp % 4 == 0);
+                                wave_gather_reqs.push(LDReq {
+                                    reg_row: dst.id,
+                                    reg_col: (i * 4 + j) as u32,
+                                    mem_offset: comp,
+                                    timer: self.config.L1_latency,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else {
+                std::panic!("")
+            }
+            gather_reqs.push((cu_id as u32, wave_id as u32, wave_gather_reqs));
+            wave.pc += 1;
+            wave.has_been_dispatched = true;
+        } else if let InstTy::SAMPLE = inst.ty {
+            // sample dst, res, sampler, coords
+            let sampler_id = match &inst.ops[2] {
+                Operand::Sampler(id) => *id,
+                _ => std::panic!(""),
+            };
+            // let sampler_id = wave.samplers[sampler_id as usize].clone();
+            let (texture_id, read_comps) = match &inst.ops[1] {
+                Operand::RMemory(rm) => match &wave.r_views[rm.id as usize] {
+                    View::TEXTURE2D(tex) => (rm.id, &rm.comps),
+                    _ => std::panic!(""),
+                },
+                _ => std::panic!(""),
+            };
+            let addresses = wave
+                .getValues(&inst.ops[3])
+                .iter()
+                .map(|v| castToFValue(&v))
+                .collect::<Vec<_>>();
+            let mut wave_sample_request: Vec<SampleReq> = Vec::new();
+            if let Operand::VRegister(dst) = &inst.ops[0] {
+                for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate() {
+                    if wave.exec_mask[i] {
+                        wave_sample_request.push(SampleReq {
+                            cu_id: cu_id as u32,
+                            wave_id: wave_id as u32,
+                            reg_row: dst.id,
+                            reg_col: i as u32,
+                            read_comps: read_comps.clone(),
+                            write_comps: dst.comps.clone(),
+                            u: addresses[i][0],
+                            v: addresses[i][1],
+                            texture: texture_id,
+                            sampler: sampler_id,
+                        });
+                        item.locked = true;
+                    }
+                }
+            } else {
+                std::panic!("")
+            };
+            // Allocate requests in the sampler
+            if sampler.get_free_slots() >= wave_sample_request.len() as u32 {
+                for req in wave_sample_request {
+                    sample_reqs.push(req);
+                }
+                wave.pc += 1;
+                wave.has_been_dispatched = true;
+            }
+        } else if let InstTy::ST = inst.ty {
+            let addr = wave.getValues(&inst.ops[1]);
+            if let Operand::VRegister(src) = &inst.ops[2] {
+                for (i, item) in wave.vgprfs[src.id as usize].iter_mut().enumerate() {
+                    if wave.exec_mask[i] {
+                        // item.locked = true;
+                        let (mem_offsets, mem_vals) = match &inst.ops[0] {
+                            Operand::RWMemory(rm) => {
+                                match &wave.rw_views[rm.id as usize] {
+                                    View::BUFFER(buf) => {
+                                        // Align at dword
+                                        assert!(addr[i][0] % 4 == 0);
+                                        let mem_offset = (buf.offset + addr[i][0]) / 4;
+                                        let mut val: Value = [0, 0, 0, 0];
+                                        applyWriteSwizzle(
+                                            &mut val,
+                                            &[
+                                                mem_offset,
+                                                mem_offset + 1,
+                                                mem_offset + 2,
+                                                mem_offset + 3,
+                                            ],
+                                            &rm.comps,
+                                        );
+                                        // Boundary checks
+                                        for i in 0..4 {
+                                            if val[i] > 0 {
+                                                assert!(
+                                                    val[i] * 4 >= buf.offset
+                                                        && val[i] * 4 < buf.offset + buf.size
+                                                );
+                                            }
+                                        }
+                                        let regval = applyReadSwizzle(&item.val, &src.comps);
+                                        (val, regval)
+                                    }
+                                    View::TEXTURE2D(tex) => {
+                                        let mem_offset = (tex.offset + addr[i][0]) / 4;
+                                        let mut mem_offsets: Value = [0, 0, 0, 0];
+                                        let regval = applyReadSwizzle(&item.val, &src.comps);
+                                        let mut mem_vals: Value = [0, 0, 0, 0];
+                                        match tex.format {
+                                            TextureFormat::RGBA8_UNORM => {
+                                                mem_offsets[0] = (tex.offset
+                                                    + tex.pitch * addr[i][1]
+                                                    + addr[i][0] * 4)
+                                                    / 4;
+                                                mem_vals[0] = unsafe {
+                                                    (((std::mem::transmute_copy::<u32, f32>(
+                                                        &regval[0],
+                                                    ) * 255.0)
+                                                        as u32)
+                                                        << 24)
+                                                        | (((std::mem::transmute_copy::<u32, f32>(
+                                                            &regval[1],
+                                                        ) * 255.0)
+                                                            as u32)
+                                                            << 16)
+                                                        | (((std::mem::transmute_copy::<u32, f32>(
+                                                            &regval[2],
+                                                        ) * 255.0)
+                                                            as u32)
+                                                            << 8)
+                                                        | (((std::mem::transmute_copy::<u32, f32>(
+                                                            &regval[3],
+                                                        ) * 255.0)
+                                                            as u32)
+                                                            << 0)
+                                                };
+                                            }
+                                            _ => std::panic!(""),
+                                        };
+                                        (mem_offsets, mem_vals)
+                                    }
+                                    _ => std::panic!(""),
+                                }
+                            }
+                            _ => std::panic!(""),
+                        };
+
+                        for i in 0..4 {
+                            if mem_offsets[i] != 0 {
+                                self.mem[mem_offsets[i] as usize] = mem_vals[i];
+                            }
+                        }
+                    }
+                }
+            } else {
+                std::panic!("")
+            }
+            wave.pc += 1;
+            wave.has_been_dispatched = true;
+        } else if let InstTy::POP_MASK = inst.ty {
+            assert!(wave.exec_mask_stack.len() != 0);
+            let prev_mask = wave.exec_mask_stack.pop().unwrap();
+            wave.exec_mask = prev_mask.0;
+            wave.pc = prev_mask.1;
+            wave.has_been_dispatched = true;
+        } else if let InstTy::PUSH_MASK = inst.ty {
+            let converge_addr = match &inst.ops[0] {
+                Operand::Label(ca) => *ca,
+                _ => std::panic!(""),
+            };
+            wave.exec_mask_stack
+                .push((wave.exec_mask.clone(), converge_addr));
+            wave.pc += 1;
+            wave.has_been_dispatched = true;
+        } else if let InstTy::JMP = inst.ty {
+            let converge_addr = match &inst.ops[0] {
+                Operand::Label(ca) => *ca,
+                _ => std::panic!(""),
+            };
+            wave.pc = converge_addr;
+            wave.has_been_dispatched = true;
+        } else if let InstTy::BR_PUSH = inst.ty {
+            match &inst.ops[0] {
+                Operand::VRegister(vreg) => {
+                    match &vreg.comps {
+                        [x, Component::NONE, Component::NONE, Component::NONE] => {}
+                        _ => std::panic!(
+                            "The first parameter should be one component e.g. r1.x, not r1.xy"
+                        ),
+                    }
+                    let values = wave.getValues(&inst.ops[0]);
+                    let true_mask = values
+                        .iter()
+                        .map(|i| i[0] != 0)
+                        .zip(&wave.exec_mask)
+                        .map(|(a, b): (bool, &bool)| a && *b)
+                        .collect::<Vec<_>>();
+                    let false_mask = true_mask
+                        .iter()
+                        .map(|i| !i)
+                        .zip(&wave.exec_mask)
+                        .map(|(a, b): (bool, &bool)| a && *b)
+                        .collect::<Vec<_>>();
+                    let (false_addr, converge_addr) = match (&inst.ops[1], &inst.ops[2]) {
+                        (Operand::Label(fa), Operand::Label(ca)) => (*fa, *ca),
+                        _ => std::panic!(""),
+                    };
+                    wave.exec_mask_stack
+                        .push((wave.exec_mask.clone(), converge_addr));
+                    wave.exec_mask_stack.push((false_mask, false_addr));
+                    wave.exec_mask = true_mask;
+                    wave.pc += 1;
+                    wave.has_been_dispatched = true;
+                }
+                _ => std::panic!("Unsupported branch parameter"),
+            }
+        } else if let InstTy::MASK_NZ = inst.ty {
+            match &inst.ops[0] {
+                Operand::VRegister(vreg) => {
+                    match &vreg.comps {
+                        [x, Component::NONE, Component::NONE, Component::NONE] => {}
+                        _ => std::panic!(
+                            "The first parameter should be one component e.g. r1.x, not r1.xy"
+                        ),
+                    }
+                    let values = wave.getValues(&inst.ops[0]);
+                    let true_mask = values
+                        .iter()
+                        .map(|i| i[0] != 0)
+                        .zip(&wave.exec_mask)
+                        .map(|(a, b): (bool, &bool)| a && *b)
+                        .collect::<Vec<_>>();
+                    let nz_cnt = true_mask.iter().filter(|&x| *x).collect::<Vec<_>>().len();
+                    if nz_cnt == 0 {
+                        assert!(wave.exec_mask_stack.len() != 0);
+                        let prev_mask = wave.exec_mask_stack.pop().unwrap();
+                        wave.exec_mask = prev_mask.0;
+                        wave.pc = prev_mask.1;
+                    } else {
+                        wave.exec_mask = true_mask;
+                        wave.pc += 1;
+                    }
+                    wave.has_been_dispatched = true;
+                }
+                _ => std::panic!("Unsupported parameter"),
+            }
+        }
+        // For simplicity dispatch commands basing only on registers used
+        else if hasVRegOps {
+            for valu in valus {
+                if !valu.ready() {
+                    continue;
+                }
+                wave.has_been_dispatched = true;
+                let mut dispInst = DispInstruction {
+                    exec_mask: Some(wave.exec_mask.clone()),
+                    src: [None, None, None],
+                    instr: Some(inst.clone()),
+                    timer: getLatency(&inst.ty),
+                    wave_id: wave_id as u32,
+                };
+                // Evaluate the source
+                for (i, op) in inst.ops[1..].iter().enumerate() {
+                    match op {
+                        Operand::VRegister(vreg) => {
+                            dispInst.src[i] = Some(wave.getValues(op));
+                        }
+                        Operand::Immediate(imm) => {
+                            dispInst.src[i] = Some(wave.getValues(op));
+                        }
+                        Operand::Builtin(imm) => {
+                            dispInst.src[i] = Some(wave.getValues(op));
+                        }
+
+                        _ => {}
+                    }
+                }
+                // Lock the destination register
+                match &inst.ty {
+                    InstTy::ADD
+                    | InstTy::SUB
+                    | InstTy::MUL
+                    | InstTy::DIV
+                    | InstTy::OR
+                    | InstTy::AND
+                    | InstTy::LT
+                    | InstTy::MOV
+                    | InstTy::UTOF => {
+                        if let Operand::VRegister(dst) = &inst.ops[0] {
+                            for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate() {
+                                if wave.exec_mask[i] {
+                                    item.locked = true;
+                                }
+                            }
+                        } else {
+                            std::panic!("")
+                        }
+                    }
+                    _ => std::panic!(""),
+                }
+                assert!(valu.push(&dispInst));
+                break;
+            }
+            // If an instruction was issued then increment PC
+            if wave.has_been_dispatched {
+                wave.pc += 1;
+                if wave.pc as usize == wave.program.as_ref().unwrap().ins.len() {
+                    // If the wave has locks then stall on the return statement
+                    if has_locks {
+                        wave.stalled = true;
+                        return;
+                    }
+
+                    wave.enabled = false;
+                    // events
+                    //     .push(Event::WAVE_RETIRED((cu_id as u32, wave_id as u32)));
+
+                    // Wave has been retired
+                }
+            } else {
+                // Not enough resources to dispatch a command
+            }
+        } else if hasSRegOps {
+            std::panic!();
+        } else if dispatchOnSampler {
+            std::panic!();
+        } else {
+            std::panic!();
+        }
+
+        // Successfully dispatched
+        return;
+    }
+    fn cu_clock(&mut self, cu_id: u32) {
+        {
+            let cu = &mut self.cus[cu_id as usize];
+            cu.l1.cache_table.reset_counters();
+            cu.sampler.cache_table.reset_counters();
+        }
+        
+
+        for wave in &mut self.cus[cu_id as usize].waves {
+            wave.has_been_dispatched = false;
+            wave.stalled = false;
+        }
+        for fe_id in 0..self.cus[cu_id as usize].fes.len() {
+            let mut gather_reqs: Vec<(u32, u32, Vec<LDReq>)> = Vec::new();
+            let mut sample_reqs: Vec<SampleReq> = Vec::new();
+            let wave_id = {
+                let fe = &mut self.cus[cu_id as usize].fes[fe_id];
+                let wave_id = fe.wave_id;
+                fe.wave_id += 1;
+                fe.wave_id = fe.wave_id % self.config.waves_per_cu;
+                wave_id
+            };
+            self.fetch_decode(cu_id, wave_id, &mut gather_reqs, &mut sample_reqs);
+            // Put memory requests
+            for req in &sample_reqs {
+                assert!(self.sample(&req));
+            }
+            for (cu_id, wave_id, gather) in &gather_reqs {
+                self.wave_gather(*cu_id, *wave_id, gather);
+            }
+        }
+        
+        self.l1_clock(cu_id as u32);
+        self.sampler_clock(cu_id as u32);
+        for valu_id in 0..self.cus[cu_id as usize].valus.len() {
+            self.valu_clock(cu_id, valu_id as u32);
+        }
+        // @TODO Scalar ALUs
     }
 }
 
@@ -1795,628 +2411,23 @@ fn clock(gpu_state: &mut GPUState) -> Option<Vec<Event>> {
         }
         gpu_state.dreqs.append(&mut deferredReq);
     }
-    let mut gather_reqs: Vec<(u32, u32, Vec<LDReq>)> = Vec::new();
-    let mut sample_reqs: Vec<SampleReq> = Vec::new();
-    let mut didSomeWork = false;
     // @Fetch-Submit part
-    // @TODO: Refactor the loop - it looks ugly
     {
         gpu_state.l2.cache_table.reset_counters();
         // For each compute unit(they run in parallel in our imagination)
-        for (cu_id, cu) in &mut gpu_state.cus.iter_mut().enumerate() {
-            cu.l1.cache_table.reset_counters();
-            cu.sampler.cache_table.reset_counters();
-            let mut sampler_free_slots = cu.sampler.get_free_slots();
-            // Clear some flags
-            for wave in &mut cu.waves {
-                wave.has_been_dispatched = false;
-                wave.stalled = false;
-            }
-            // For each fetch-exec unit
-            for fe in &mut cu.fes {
-                for (wave_id, wave) in &mut cu.waves.iter_mut().enumerate() {
-                    if wave.enabled && !wave.has_been_dispatched && !wave.stalled {
-                        wave.clock_counter += 1;
-                        // At least we have some wave that must be doing something
-                        didSomeWork = true;
-                        // This wave might be stalled because of instruction dependencies
-                        // or it might be waiting for the last instruction before retiring
-
-                        // @DEAD
-                        // if wave.pc >= wave.program.as_ref().unwrap().ins.len() as u32 {
-                        //     let has_locks = wave.vgprfs.iter().any(|x| x.iter().any(|y| y.locked));
-                        //     if has_locks {
-                        //         wave.stalled = true;
-                        //         continue;
-                        //     }
-                        //     // Retire if no register locks
-                        //     wave.enabled = false;
-                        // }
-
-                        let inst = &(*wave.program.as_ref().unwrap()).ins[wave.pc as usize];
-                        let mut hasVRegOps = false;
-                        let mut hasSRegOps = false;
-                        let mut dispatchOnSampler = false;
-                        let mut control_flow_cmd = false;
-                        let mut has_dep = false;
-
-                        // Do simple decoding and sanity checks
-                        for op in &inst.ops {
-                            match &op {
-                                Operand::VRegister(vreg) => {
-                                    for (i, item) in
-                                        wave.vgprfs[vreg.id as usize].iter_mut().enumerate()
-                                    {
-                                        if wave.exec_mask[i] && item.locked {
-                                            has_dep = true;
-                                        }
-                                    }
-                                    hasVRegOps = true;
-                                }
-                                Operand::SRegister(sreg) => {
-                                    if wave.sgprf[sreg.id as usize].locked {
-                                        has_dep = true;
-                                    }
-
-                                    hasSRegOps = true;
-                                }
-                                Operand::Immediate(imm) => {}
-                                Operand::Builtin(buiiltin) => {}
-                                Operand::Label(label) => {}
-                                Operand::Sampler(s) => {}
-                                Operand::RMemory(mr) => {}
-                                Operand::RWMemory(mr) => {}
-                                Operand::NONE => {}
-                                _ => {
-                                    std::panic!("");
-                                }
-                            }
-                        }
-                        match &inst.ty {
-                            InstTy::ADD
-                            | InstTy::SUB
-                            | InstTy::MUL
-                            | InstTy::DIV
-                            | InstTy::LT
-                            | InstTy::OR
-                            | InstTy::AND
-                            | InstTy::ST
-                            | InstTy::LD => {
-                                inst.assertThreeOp();
-                            }
-                            InstTy::SAMPLE => {
-                                inst.assertFourOp();
-                            }
-                            InstTy::BR_PUSH
-                            | InstTy::POP_MASK
-                            | InstTy::RET
-                            | InstTy::PUSH_MASK
-                            | InstTy::JMP
-                            | InstTy::MASK_NZ => {
-                                control_flow_cmd = true;
-                            }
-                            InstTy::MOV | InstTy::UTOF => {
-                                inst.assertTwoOp();
-                            }
-                            _ => {
-                                std::panic!("");
-                            }
-                        };
-                        // @TODO: Make proper sanity checks
-
-                        // @DEAD
-                        // assert!(
-                        //     vec![hasSRegOps, dispatchOnSampler, hasVRegOps]
-                        //         .iter()
-                        //         .filter(|&a| *a == true)
-                        //         .collect::<Vec<&bool>>()
-                        //         .len()
-                        //         == 1 // Mixing different register types
-                        //         || branchingOp
-                        // );
-
-                        // One of the operands is being locked
-                        // Stall the wave
-                        if has_dep {
-                            wave.stalled = true;
-                            continue;
-                        }
-                        let has_locks = wave.vgprfs.iter().any(|x| x.iter().any(|y| y.locked));
-                        if let InstTy::RET = inst.ty {
-                            // If the wave has locks then stall on the return statement
-                            // Don't increment the pc - we will hit the same instruction next cycle
-                            if has_locks {
-                                wave.stalled = true;
-                                continue;
-                            }
-                            wave.enabled = false;
-                            events.push(Event::WAVE_RETIRED((cu_id as u32, wave_id as u32)));
-                        } else if let InstTy::LD = inst.ty {
-                            let mut wave_gather_reqs: Vec<LDReq> = Vec::new();
-                            let addr = wave.getValues(&inst.ops[2]);
-                            if let Operand::VRegister(dst) = &inst.ops[0] {
-                                for (i, item) in wave.vgprfs[dst.id as usize].iter().enumerate() {
-                                    if wave.exec_mask[i] {
-                                        let mem_val = match &inst.ops[1] {
-                                            Operand::RMemory(rm) => {
-                                                match &wave.r_views[rm.id as usize] {
-                                                    View::BUFFER(buf) => {
-                                                        let mem_offset = buf.offset + addr[i][0];
-                                                        let val = applyReadSwizzle(
-                                                            &[
-                                                                mem_offset,
-                                                                mem_offset + 4,
-                                                                mem_offset + 8,
-                                                                mem_offset + 12,
-                                                            ],
-                                                            &rm.comps,
-                                                        );
-                                                        // Boundary checks
-                                                        for i in 0..4 {
-                                                            if val[i] > 0 {
-                                                                assert!(
-                                                                    val[i] >= buf.offset
-                                                                        && val[i]
-                                                                            < buf.offset + buf.size
-                                                                );
-                                                            }
-                                                        }
-                                                        val
-                                                    }
-                                                    _ => std::panic!(""),
-                                                }
-                                            }
-                                            _ => std::panic!(""),
-                                        };
-                                        let mut address: Value = [0, 0, 0, 0];
-                                        applyWriteSwizzle(&mut address, &mem_val, &dst.comps);
-                                        for (j, &comp) in address.iter().enumerate() {
-                                            if comp != 0 {
-                                                // Align at dword
-                                                assert!(comp % 4 == 0);
-                                                wave_gather_reqs.push(LDReq {
-                                                    reg_row: dst.id,
-                                                    reg_col: (i * 4 + j) as u32,
-                                                    mem_offset: comp,
-                                                    timer: gpu_state.config.L1_latency,
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                std::panic!("")
-                            }
-                            gather_reqs.push((cu_id as u32, wave_id as u32, wave_gather_reqs));
-                            wave.pc += 1;
-                            wave.has_been_dispatched = true;
-                        } else if let InstTy::SAMPLE = inst.ty {
-                            // sample dst, res, sampler, coords
-                            let sampler_id = match &inst.ops[2] {
-                                Operand::Sampler(id) => *id,
-                                _ => std::panic!(""),
-                            };
-                            // let sampler_id = wave.samplers[sampler_id as usize].clone();
-                            let (texture_id, read_comps) = match &inst.ops[1] {
-                                Operand::RMemory(rm) => match &wave.r_views[rm.id as usize] {
-                                    View::TEXTURE2D(tex) => (rm.id, &rm.comps),
-                                    _ => std::panic!(""),
-                                },
-                                _ => std::panic!(""),
-                            };
-                            let addresses = wave
-                                .getValues(&inst.ops[3])
-                                .iter()
-                                .map(|v| castToFValue(&v))
-                                .collect::<Vec<_>>();
-                            let mut wave_sample_request: Vec<SampleReq> = Vec::new();
-                            if let Operand::VRegister(dst) = &inst.ops[0] {
-                                for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate()
-                                {
-                                    if wave.exec_mask[i] {
-                                        wave_sample_request.push(SampleReq {
-                                            cu_id: cu_id as u32,
-                                            wave_id: wave_id as u32,
-                                            reg_row: dst.id,
-                                            reg_col: i as u32,
-                                            read_comps: read_comps.clone(),
-                                            write_comps: dst.comps.clone(),
-                                            u: addresses[i][0],
-                                            v: addresses[i][1],
-                                            texture: texture_id,
-                                            sampler: sampler_id,
-                                        });
-                                        item.locked = true;
-                                    }
-                                }
-                            } else {
-                                std::panic!("")
-                            };
-                            // Allocate requests in the sampler
-                            if sampler_free_slots >= wave_sample_request.len() as u32 {
-                                sampler_free_slots =
-                                    sampler_free_slots - wave_sample_request.len() as u32;
-                                for req in wave_sample_request {
-                                    sample_reqs.push(req);
-                                }
-                                wave.pc += 1;
-                                wave.has_been_dispatched = true;
-                            }
-                        } else if let InstTy::ST = inst.ty {
-                            let addr = wave.getValues(&inst.ops[1]);
-                            if let Operand::VRegister(src) = &inst.ops[2] {
-                                for (i, item) in wave.vgprfs[src.id as usize].iter_mut().enumerate()
-                                {
-                                    if wave.exec_mask[i] {
-                                        // item.locked = true;
-                                        let (mem_offsets, mem_vals) = match &inst.ops[0] {
-                                            Operand::RWMemory(rm) => {
-                                                match &wave.rw_views[rm.id as usize] {
-                                                    View::BUFFER(buf) => {
-                                                        // Align at dword
-                                                        assert!(addr[i][0] % 4 == 0);
-                                                        let mem_offset =
-                                                            (buf.offset + addr[i][0]) / 4;
-                                                        let mut val: Value = [0, 0, 0, 0];
-                                                        applyWriteSwizzle(
-                                                            &mut val,
-                                                            &[
-                                                                mem_offset,
-                                                                mem_offset + 1,
-                                                                mem_offset + 2,
-                                                                mem_offset + 3,
-                                                            ],
-                                                            &rm.comps,
-                                                        );
-                                                        // Boundary checks
-                                                        for i in 0..4 {
-                                                            if val[i] > 0 {
-                                                                assert!(
-                                                                    val[i] * 4 >= buf.offset
-                                                                        && val[i] * 4
-                                                                            < buf.offset + buf.size
-                                                                );
-                                                            }
-                                                        }
-                                                        let regval =
-                                                            applyReadSwizzle(&item.val, &src.comps);
-                                                        (val, regval)
-                                                    }
-                                                    View::TEXTURE2D(tex) => {
-                                                        let mem_offset =
-                                                            (tex.offset + addr[i][0]) / 4;
-                                                        let mut mem_offsets: Value = [0, 0, 0, 0];
-                                                        let regval =
-                                                            applyReadSwizzle(&item.val, &src.comps);
-                                                        let mut mem_vals: Value = [0, 0, 0, 0];
-                                                        match tex.format {
-                                                            TextureFormat::RGBA8_UNORM => {
-                                                                mem_offsets[0] = (tex.offset
-                                                                    + tex.pitch * addr[i][1]
-                                                                    + addr[i][0] * 4)
-                                                                    / 4;
-                                                                mem_vals[0] = unsafe {
-                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[0]) * 255.0 ) as u32) << 24) |
-                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[1]) * 255.0 ) as u32) << 16) |
-                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[2]) * 255.0 ) as u32) << 8) |
-                                                                    (((std::mem::transmute_copy::<u32,f32>(&regval[3]) * 255.0 ) as u32) << 0)
-                                                                };
-                                                            }
-                                                            _ => std::panic!(""),
-                                                        };
-                                                        (mem_offsets, mem_vals)
-                                                    }
-                                                    _ => std::panic!(""),
-                                                }
-                                            }
-                                            _ => std::panic!(""),
-                                        };
-
-                                        for i in 0..4 {
-                                            if mem_offsets[i] != 0 {
-                                                gpu_state.mem[mem_offsets[i] as usize] =
-                                                    mem_vals[i];
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                std::panic!("")
-                            }
-                            wave.pc += 1;
-                            wave.has_been_dispatched = true;
-                        } else if let InstTy::POP_MASK = inst.ty {
-                            assert!(wave.exec_mask_stack.len() != 0);
-                            let prev_mask = wave.exec_mask_stack.pop().unwrap();
-                            wave.exec_mask = prev_mask.0;
-                            wave.pc = prev_mask.1;
-                            wave.has_been_dispatched = true;
-                        } else if let InstTy::PUSH_MASK = inst.ty {
-                            let converge_addr = match &inst.ops[0] {
-                                Operand::Label(ca) => *ca,
-                                _ => std::panic!(""),
-                            };
-                            wave.exec_mask_stack
-                                .push((wave.exec_mask.clone(), converge_addr));
-                            wave.pc += 1;
-                            wave.has_been_dispatched = true;
-                        } else if let InstTy::JMP = inst.ty {
-                            let converge_addr = match &inst.ops[0] {
-                                Operand::Label(ca) => *ca,
-                                _ => std::panic!(""),
-                            };
-                            wave.pc = converge_addr;
-                            wave.has_been_dispatched = true;
-                        } else if let InstTy::BR_PUSH = inst.ty {
-                            match &inst.ops[0] {
-                                Operand::VRegister(vreg) => {
-                                    match &vreg.comps {
-                                        [x, Component::NONE, Component::NONE, Component::NONE] => {
-
-                                        }
-                                        _ => std::panic!("The first parameter should be one component e.g. r1.x, not r1.xy")
-                                    }
-                                    let values = wave.getValues(&inst.ops[0]);
-                                    let true_mask = values
-                                        .iter()
-                                        .map(|i| i[0] != 0)
-                                        .zip(&wave.exec_mask)
-                                        .map(|(a, b): (bool, &bool)| a && *b)
-                                        .collect::<Vec<_>>();
-                                    let false_mask = true_mask
-                                        .iter()
-                                        .map(|i| !i)
-                                        .zip(&wave.exec_mask)
-                                        .map(|(a, b): (bool, &bool)| a && *b)
-                                        .collect::<Vec<_>>();
-                                    let (false_addr, converge_addr) =
-                                        match (&inst.ops[1], &inst.ops[2]) {
-                                            (Operand::Label(fa), Operand::Label(ca)) => (*fa, *ca),
-                                            _ => std::panic!(""),
-                                        };
-                                    wave.exec_mask_stack
-                                        .push((wave.exec_mask.clone(), converge_addr));
-                                    wave.exec_mask_stack.push((false_mask, false_addr));
-                                    wave.exec_mask = true_mask;
-                                    wave.pc += 1;
-                                    wave.has_been_dispatched = true;
-                                }
-                                _ => std::panic!("Unsupported branch parameter"),
-                            }
-                        } else if let InstTy::MASK_NZ = inst.ty {
-                            match &inst.ops[0] {
-                                Operand::VRegister(vreg) => {
-                                    match &vreg.comps {
-                                        [x, Component::NONE, Component::NONE, Component::NONE] => {
-
-                                        }
-                                        _ => std::panic!("The first parameter should be one component e.g. r1.x, not r1.xy")
-                                    }
-                                    let values = wave.getValues(&inst.ops[0]);
-                                    let true_mask = values
-                                        .iter()
-                                        .map(|i| i[0] != 0)
-                                        .zip(&wave.exec_mask)
-                                        .map(|(a, b): (bool, &bool)| a && *b)
-                                        .collect::<Vec<_>>();
-                                    let nz_cnt =
-                                        true_mask.iter().filter(|&x| *x).collect::<Vec<_>>().len();
-                                    if nz_cnt == 0 {
-                                        assert!(wave.exec_mask_stack.len() != 0);
-                                        let prev_mask = wave.exec_mask_stack.pop().unwrap();
-                                        wave.exec_mask = prev_mask.0;
-                                        wave.pc = prev_mask.1;
-                                    } else {
-                                        wave.exec_mask = true_mask;
-                                        wave.pc += 1;
-                                    }
-                                    wave.has_been_dispatched = true;
-                                }
-                                _ => std::panic!("Unsupported parameter"),
-                            }
-                        }
-                        // For simplicity dispatch commands basing only on registers used
-                        else if hasVRegOps {
-                            for valu in &mut cu.valus {
-                                if !valu.ready() {
-                                    continue;
-                                }
-                                wave.has_been_dispatched = true;
-                                let mut dispInst = DispInstruction {
-                                    exec_mask: Some(wave.exec_mask.clone()),
-                                    src: [None, None, None],
-                                    instr: Some(inst.clone()),
-                                    timer: getLatency(&inst.ty),
-                                    wave_id: wave_id as u32,
-                                };
-                                // Evaluate the source
-                                for (i, op) in inst.ops[1..].iter().enumerate() {
-                                    match op {
-                                        Operand::VRegister(vreg) => {
-                                            dispInst.src[i] = Some(wave.getValues(op));
-                                        }
-                                        Operand::Immediate(imm) => {
-                                            dispInst.src[i] = Some(wave.getValues(op));
-                                        }
-                                        Operand::Builtin(imm) => {
-                                            dispInst.src[i] = Some(wave.getValues(op));
-                                        }
-
-                                        _ => {}
-                                    }
-                                }
-                                // Lock the destination register
-                                match &inst.ty {
-                                    InstTy::ADD
-                                    | InstTy::SUB
-                                    | InstTy::MUL
-                                    | InstTy::DIV
-                                    | InstTy::OR
-                                    | InstTy::AND
-                                    | InstTy::LT
-                                    | InstTy::MOV
-                                    | InstTy::UTOF => {
-                                        if let Operand::VRegister(dst) = &inst.ops[0] {
-                                            for (i, item) in
-                                                wave.vgprfs[dst.id as usize].iter_mut().enumerate()
-                                            {
-                                                if wave.exec_mask[i] {
-                                                    item.locked = true;
-                                                }
-                                            }
-                                        } else {
-                                            std::panic!("")
-                                        }
-                                    }
-                                    _ => std::panic!(""),
-                                }
-                                assert!(valu.push(&dispInst));
-                                break;
-                            }
-                            // If an instruction was issued then increment PC
-                            if wave.has_been_dispatched {
-                                wave.pc += 1;
-                                if wave.pc as usize == wave.program.as_ref().unwrap().ins.len() {
-                                    // If the wave has locks then stall on the return statement
-                                    if has_locks {
-                                        wave.stalled = true;
-                                        continue;
-                                    }
-
-                                    wave.enabled = false;
-                                    events
-                                        .push(Event::WAVE_RETIRED((cu_id as u32, wave_id as u32)));
-
-                                    // Wave has been retired
-                                }
-                            } else {
-                                // Not enough resources to dispatch a command
-                            }
-                        } else if hasSRegOps {
-                            std::panic!();
-                        } else if dispatchOnSampler {
-                            std::panic!();
-                        } else {
-                            std::panic!();
-                        }
-
-                        // Successfully dispatched
-                        break;
-                    }
-                }
-            }
-            // @ALU
-            // Now do work on Vector ALUs
-            for valu in &mut cu.valus {
-                let inst = valu.pop();
-                valu.active = false;
-                if inst.is_some() {
-                    valu.active = true;
-                    didSomeWork = true;
-
-                    let dispInst = inst.unwrap();
-                    let mut wave = &mut cu.waves[dispInst.wave_id as usize];
-                    let exec_mask = &dispInst.exec_mask.as_ref().unwrap();
-                    let inst = dispInst.instr.unwrap();
-                    match &inst.ty {
-                        InstTy::ADD
-                        | InstTy::SUB
-                        | InstTy::MUL
-                        | InstTy::DIV
-                        | InstTy::LT
-                        | InstTy::OR
-                        | InstTy::AND => {
-                            let src1 = dispInst.src[0].as_ref().unwrap();
-                            let src2 = dispInst.src[1].as_ref().unwrap();
-                            let dst = match &inst.ops[0] {
-                                Operand::VRegister(dst) => dst,
-                                _ => std::panic!(""),
-                            };
-                            let result = {
-                                // @TODO: sub, div, mul
-                                src1.iter()
-                                    .zip(src2.iter())
-                                    // @TODO: Support different types
-                                    .map(|(&x1, &x2)| match inst.interp {
-                                        Interpretation::F32 => match inst.ty {
-                                            InstTy::ADD => AddF32(&x1, &x2),
-                                            InstTy::SUB => SubF32(&x1, &x2),
-                                            InstTy::MUL => MulF32(&x1, &x2),
-                                            InstTy::DIV => DivF32(&x1, &x2),
-                                            InstTy::LT => LTF32(&x1, &x2),
-                                            _ => std::panic!(""),
-                                        },
-                                        Interpretation::U32 => match inst.ty {
-                                            InstTy::ADD => AddU32(&x1, &x2),
-                                            InstTy::SUB => SubU32(&x1, &x2),
-                                            InstTy::MUL => MulU32(&x1, &x2),
-                                            InstTy::DIV => DivU32(&x1, &x2),
-                                            InstTy::LT => LTU32(&x1, &x2),
-                                            InstTy::OR => ORU32(&x1, &x2),
-                                            InstTy::AND => ANDU32(&x1, &x2),
-                                            _ => std::panic!(""),
-                                        },
-
-                                        _ => std::panic!(""),
-                                    })
-                                    .collect::<Vec<Value>>()
-                            };
-                            assert!(wave.vgprfs[dst.id as usize].len() == result.len());
-                            // Registers should be unlocked by this time
-                            for (i, item) in
-                                &mut wave.vgprfs[dst.id as usize].iter_mut().enumerate()
-                            {
-                                if exec_mask[i as usize] {
-                                    applyWriteSwizzle(&mut item.val, &result[i], &dst.comps);
-                                    item.locked = false;
-                                }
-                            }
-                        }
-                        InstTy::MOV | InstTy::UTOF => {
-                            let src1 = dispInst.src[0].as_ref().unwrap();
-                            let dst = match &inst.ops[0] {
-                                Operand::VRegister(dst) => dst,
-                                _ => std::panic!(""),
-                            };
-                            assert!(wave.vgprfs[dst.id as usize].len() == src1.len());
-                            // Registers should be unlocked by this time
-                            for (i, item) in
-                                &mut wave.vgprfs[dst.id as usize].iter_mut().enumerate()
-                            {
-                                if exec_mask[i as usize] {
-                                    let src = match &inst.ty {
-                                        InstTy::MOV => src1[i],
-                                        InstTy::UTOF => U2F(&src1[i]),
-                                        _ => std::panic!(""),
-                                    };
-                                    applyWriteSwizzle(&mut item.val, &src, &dst.comps);
-                                    item.locked = false;
-                                }
-                            }
-                        }
-                        _ => std::panic!("unsupported {:?}", inst.ops[0]),
-                    };
-                }
-            }
-            // And on Scalar ALUs
-            for salu in &mut cu.salus {}
+        for cu_id in 0..gpu_state.cus.len() {
+            gpu_state.cu_clock(cu_id as u32);
         }
-    }
-    // Put memory requests
-    for req in sample_reqs {
-        assert!(gpu_state.sample(&req));
-    }
-    for (cu_id, wave_id, gather) in gather_reqs {
-        gpu_state.wave_gather(cu_id, wave_id, &gather);
-    }
-    for cu_id in 0..gpu_state.cus.len() {
-        gpu_state.l1_clock(cu_id as u32);
-        gpu_state.sampler_clock(cu_id as u32);
     }
     gpu_state.l2_clock();
     gpu_state.mem_clock();
     gpu_state.clock_counter += 1;
-    if didSomeWork {
+    let gpu_active = gpu_state.dreqs.len() != 0 || gpu_state.cus.iter().any(|cu| {
+        cu.waves.iter().any(|wave| {
+            wave.enabled
+        })
+    });
+    if gpu_active {
         Some(events)
     } else {
         None
@@ -2972,7 +2983,7 @@ pub fn guppy_dispatch(text: &str, group_size: u32, groups_count: u32) {
     let program = Program { ins: res };
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
     let bind_state = unsafe { g_bind_state.as_mut().unwrap() };
-    alert(&format!("bind_state {:?}!", bind_state));
+    // alert(&format!("bind_state {:?}!", bind_state));
     dispatch(
         gpu_state,
         &program,
@@ -3203,7 +3214,7 @@ mod tests {
             CU_count: 12,
             ALU_per_cu: 2,
             waves_per_cu: 4,
-            fd_per_cu: 4,
+            fd_per_cu: 1,
             ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
@@ -3337,7 +3348,7 @@ mod tests {
             CU_count: 8,
             ALU_per_cu: 4,
             waves_per_cu: 8,
-            fd_per_cu: 4,
+            fd_per_cu: 1,
             ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
@@ -3514,9 +3525,9 @@ mod tests {
         let config = GPUConfig {
             DRAM_latency: 4,
             DRAM_bandwidth: 64,
-            L1_size: 64,
+            L1_size: 64 * 3,
             L1_latency: 4,
-            L2_size: 64,
+            L2_size: 64 * 3,
             L2_latency: 4,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
@@ -3555,41 +3566,57 @@ mod tests {
         );
         let mut history: Vec<String> = Vec::new();
         while clock(&mut gpu_state).is_some() {
-            // "\"{:?}:<{:?}|{:?}|{:?}>\",",
+            
 
             let line = format!(
+                // "\"{:?}:<{:?}|{:?}|{:?}>\",",
                 "{:?}:<{:?}|{:?}|{:?}>",
                 gpu_state.cus[0].waves[0].pc,
                 gpu_state.ld_reqs.len(),
                 gpu_state.l2.req_queue.len(),
                 gpu_state.cus[0].l1.gather_queue.len()
             );
+            println!("{}", line);
             history.push(line);
         }
+        // println!();
         assert_eq!(
             history,
             vec![
+                "1:<0|0|0>",
+                "1:<0|0|0>",
+                "1:<0|0|0>",
+                "1:<0|0|0>",
                 "1:<0|0|0>",
                 "2:<0|0|0>",
                 "2:<0|0|0>",
                 "3:<0|0|3>",
                 "4:<0|0|3>",
-                "5:<0|0|3>",
-                "6:<0|3|4>",
-                "6:<0|3|4>",
-                "6:<0|3|4>",
-                "6:<3|4|4>",
-                "6:<3|4|4>",
-                "6:<3|4|4>",
-                "6:<3|1|1>",
-                "6:<2|1|1>",
+                "4:<0|0|3>",
+                "4:<0|3|3>",
+                "4:<0|3|3>",
+                "4:<0|3|3>",
+                "5:<3|0|3>",
+                "6:<3|3|4>",
+                "6:<3|3|4>",
+                "6:<2|3|3>",
                 "6:<1|1|1>",
-                "6:<0|0|0>",
+                "6:<0|1|1>",
+                "6:<0|1|1>",
+                "6:<1|0|1>",
+                "6:<1|1|1>",
+                "6:<1|1|1>",
+                "6:<0|1|0>",
+                "7:<0|0|0>",
+                "7:<0|0|0>",
+                "7:<0|0|0>",
+                "7:<0|0|0>",
                 "7:<0|0|0>",
                 "8:<0|0|0>",
                 "8:<0|0|0>",
                 "9:<0|0|0>",
-                "9:<0|0|0>",
+
+
             ]
         );
     }
@@ -4171,11 +4198,11 @@ mod tests {
             // }
             // println!("");
         }
-        assert_eq!(11, gpu_state.clock_counter);
+        assert_eq!(10, gpu_state.clock_counter);
         let mut gpu_state = GPUState::new(&config);
         dispatch(&mut gpu_state, &program, vec![], vec![], vec![], 8, 1);
         while clock(&mut gpu_state).is_some() {}
-        assert_eq!(14, gpu_state.clock_counter);
+        assert_eq!(13, gpu_state.clock_counter);
 
         // @DEAD
         // println!("{}", gpu_state.clock_counter);
