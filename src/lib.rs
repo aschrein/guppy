@@ -582,6 +582,9 @@ struct CacheTable {
     contents: Vec<Vec<Option<CacheLine>>>,
     associativity: u32,
     size: u32,
+    miss_cnt: u32,
+    hit_cnt: u32,
+    evict_cnt: u32,
 }
 
 impl CacheTable {
@@ -598,7 +601,15 @@ impl CacheTable {
             associativity: associativity,
             size: size,
             contents: contents,
+            hit_cnt: 0,
+            miss_cnt: 0,
+            evict_cnt: 0,
         }
+    }
+    fn reset_counters(&mut self) {
+        self.miss_cnt = 0;
+        self.hit_cnt = 0;
+        self.evict_cnt = 0;
     }
     fn getIndex(&self, mem_offset: u32) -> u32 {
         // Calculate the bin tag/index of the cacheline
@@ -611,6 +622,9 @@ impl CacheTable {
     fn putLine(&mut self, line: &CacheLine) {
         let index = self.getIndex(line.address);
         let mut new_bin: Vec<Option<CacheLine>> = Vec::new();
+        if self.contents[index as usize][0].is_some() {
+            self.evict_cnt += 1;
+        }
         // evict the eldest line
         for line in &self.contents[index as usize][1..] {
             if let Some(line_some) = line {
@@ -622,15 +636,17 @@ impl CacheTable {
         new_bin.push(Some((*line).clone()));
         self.contents[index as usize] = new_bin;
     }
-    fn getLine(&self, page_offset: u32) -> Option<CacheLine> {
+    fn getLine(&mut self, page_offset: u32) -> Option<CacheLine> {
         let index = self.getIndex(page_offset);
         for line in &self.contents[index as usize] {
             if let Some(line) = line {
                 if line.address == page_offset {
+                    self.hit_cnt += 1;
                     return Some(line.clone());
                 }
             }
         }
+        self.miss_cnt += 1;
         None
     }
 }
@@ -644,16 +660,18 @@ struct L1CacheState {
 
 #[derive(Hash, Debug, Clone)]
 struct L2PageReq {
-    l1_target: bool,
+    mem_offset: u32,
+    cu_id: u32,
     timer: u32,
 }
 
 struct L2CacheState {
     cache_table: CacheTable,
+    // reqs: Vec<Option<L2PageReq>>,
+    // free_reqs: Vec<u32>,
+    // wait_reqs: HashSet<u32>,
     // mem_offset -> cu_id -> timeout
-    // @TODO: limit the maximum number of request queue
-    req_queue: HashMap<u32, HashMap<u32, L2PageReq>>,
-    // smp_queue: HashMap<u32, HashMap<u32, u32>>,
+    req_queue: HashMap<u32, HashMap<u32, u32>>,
 }
 
 impl L1CacheState {
@@ -667,11 +685,34 @@ impl L1CacheState {
 
 impl L2CacheState {
     fn new(size: u32, associativity: u32) -> L2CacheState {
+        let mut reqs: Vec<Option<L2PageReq>> = Vec::new();
+        for i in 0..1024 {
+            reqs.push(None);
+        }
+        let mut free_reqs: Vec<u32> = Vec::new();
+        for i in 0..1024 {
+            free_reqs.push(i);
+        }
         L2CacheState {
             cache_table: CacheTable::new(size, associativity),
+            // reqs: reqs,
+            // free_reqs: free_reqs,
+            // wait_reqs: HashSet::new(),
             req_queue: HashMap::new(),
         }
     }
+    // fn alloc_id(&mut self) -> Option<u32> {
+    //     if self.free_reqs.len() != 0 {
+    //         let id = self.free_reqs.pop().unwrap();
+    //         self.wait_reqs.insert(id);
+    //         Some(id)
+    //     } else {
+    //         None
+    //     }
+    // }
+    // fn get_free_slots(&self) -> u32 {
+    //     self.free_reqs.len() as u32
+    // }
 }
 
 struct SLMState {}
@@ -735,7 +776,7 @@ struct GPUState {
     clock_counter: u32,
     l2: L2CacheState,
     // queue for future work
-    dreqs: Vec<DispatchReq>,
+    dreqs: VecDeque<DispatchReq>,
     // Well, memory
     mem: Vec<u32>,
     // page_offset -> timer
@@ -753,7 +794,7 @@ impl GPUState {
         GPUState {
             cus: cus,
             l2: L2CacheState::new(config.L2_size / 64, 2),
-            dreqs: Vec::new(),
+            dreqs: VecDeque::new(),
             config: config.clone(),
             mem: Vec::new(),
             clock_counter: 0,
@@ -770,6 +811,24 @@ impl GPUState {
             }
         }
         100.0 * (res as f64) / (self.config.CU_count * self.config.ALU_per_cu) as f64
+    }
+    fn get_l1_metrics(&self) -> (u32, u32, u32) {
+        let mut res: (u32, u32, u32) = (0, 0, 0);
+        for cu in &self.cus {
+            res.0 += cu.l1.cache_table.hit_cnt;
+            res.1 += cu.l1.cache_table.miss_cnt;
+            res.2 += cu.l1.cache_table.evict_cnt;
+        }
+        res
+    }
+    fn get_sampler_metrics(&self) -> (u32, u32, u32) {
+        let mut res: (u32, u32, u32) = (0, 0, 0);
+        for cu in &self.cus {
+            res.0 += cu.sampler.cache_table.hit_cnt;
+            res.1 += cu.sampler.cache_table.miss_cnt;
+            res.2 += cu.sampler.cache_table.evict_cnt;
+        }
+        res
     }
     fn findFreeWave(&self) -> Option<(usize, usize)> {
         for (i, cu) in self.cus.iter().enumerate() {
@@ -959,16 +1018,14 @@ impl GPUState {
             let req = self.cus[cu_id as usize].sampler.reqs[req_id as usize]
                 .as_mut()
                 .unwrap();
-            if req.timer == 1 {
+            req.timer = if req.timer != 0 { req.timer - 1 } else { 0 };
+            if req.timer == 0 {
                 new_ready_reqs.push(req_id);
             }
-            req.timer = if req.timer != 0 { req.timer - 1 } else { 0 };
         }
 
-        let mut missed_pages: Vec<(u32, u32)> = Vec::new();
         // Try to serve ready requests
         for req_id in new_ready_reqs {
-            self.cus[cu_id as usize].sampler.wait_reqs.remove(&req_id);
             let mut req = self.cus[cu_id as usize].sampler.reqs[req_id as usize]
                 .clone()
                 .unwrap();
@@ -983,8 +1040,18 @@ impl GPUState {
                     .getLine(page_offset)
                 {
                     val.2 = Some(line.mem[((val.0 - page_offset) / 4) as usize]);
+                    self.cus[cu_id as usize].sampler.wait_reqs.remove(&req_id);
                 } else {
-                    missed_pages.push((page_offset, req_id));
+                    // missed_pages.push((page_offset, req_id));
+                    if self.l2_request_page(cu_id, page_offset) {
+                        // Register the page in the request table
+                        let queue = &mut self.cus[cu_id as usize].sampler.gather_queue;
+                        if !queue.contains_key(&page_offset) {
+                            queue.insert(page_offset, HashSet::new());
+                        }
+                        queue.get_mut(&page_offset).unwrap().insert(req_id);
+                        self.cus[cu_id as usize].sampler.wait_reqs.remove(&req_id);
+                    }
                 }
             }
             let complete = req.values.iter().all(|x| x.2.is_some());
@@ -992,17 +1059,6 @@ impl GPUState {
             if complete {
                 self.serve_sample(cu_id, req_id);
             }
-        }
-        // For each missed page
-        for (page, req_id) in missed_pages {
-            // Request the page from l2
-            self.l2_request_page(cu_id, page, false);
-            // Register the page in the request table
-            let queue = &mut self.cus[cu_id as usize].sampler.gather_queue;
-            if !queue.contains_key(&page) {
-                queue.insert(page, HashSet::new());
-            }
-            queue.get_mut(&page).unwrap().insert(req_id);
         }
     }
     fn loadMem(&mut self, page_offset: u32, timeout: u32) {
@@ -1079,31 +1135,24 @@ impl GPUState {
             // Try to find the page in the table
             {
                 let cu_state = &mut self.cus[cu_id as usize];
-                for bin in &cu_state.l1.cache_table.contents {
-                    for line in bin {
-                        if let Some(line) = line {
-                            if line.address == mem_offset {
-                                // Cache hit
-                                let wave = &mut cu_state.waves[wave_id as usize];
-                                // @COPYPASTE
-                                assert!(req.mem_offset >= line.address);
-                                let reg = &mut wave.vgprfs[req.reg_row as usize]
-                                    [(req.reg_col / 4) as usize];
-                                reg.val[(req.reg_col % 4) as usize] =
-                                    line.mem[((req.mem_offset - line.address) / 4) as usize];
-                                // @REFINE: Unlock the register. Assuming there could be no other
-                                // pending requests for this register.
-                                reg.locked = false;
-                                served = true;
-                            }
-                        }
-                    }
+                if let Some(line) = cu_state.l1.cache_table.getLine(mem_offset) {
+                    // Cache hit
+                    let wave = &mut cu_state.waves[wave_id as usize];
+                    // @COPYPASTE
+                    assert!(req.mem_offset >= line.address);
+                    let reg = &mut wave.vgprfs[req.reg_row as usize][(req.reg_col / 4) as usize];
+                    reg.val[(req.reg_col % 4) as usize] =
+                        line.mem[((req.mem_offset - line.address) / 4) as usize];
+                    // @REFINE: Unlock the register. Assuming there could be no other
+                    // pending requests for this register.
+                    reg.locked = false;
+                    served = true;
                 }
             }
             // Cache miss
             if !served {
                 // Emit the request to L2 cache
-                self.l2_request_page(cu_id, mem_offset, true);
+                self.l2_request_page(cu_id, mem_offset);
                 // Put the request back to the queue
                 new_gather_queue
                     .get_mut(&mem_offset)
@@ -1166,10 +1215,11 @@ impl GPUState {
         cu_state.l1.cache_table.putLine(&line);
     }
 
-    fn l2_request_page(&mut self, cu_id: u32, page_offset: u32, l1_target: bool) {
+    fn l2_request_page(&mut self, cu_id: u32, page_offset: u32) -> bool {
         let page_size = 64 as u32;
         assert!(((page_size as i32) & -(page_size as i32)) == (page_size as i32));
         assert!((page_offset & (page_size - 1)) == 0);
+       
         if !self.l2.req_queue.contains_key(&page_offset) {
             self.l2.req_queue.insert(page_offset, HashMap::new());
         }
@@ -1182,27 +1232,25 @@ impl GPUState {
         {
             self.l2.req_queue.get_mut(&page_offset).unwrap().insert(
                 cu_id,
-                L2PageReq {
-                    timer: self.config.L2_latency,
-                    l1_target: l1_target,
-                },
+                self.config.L2_latency,
             );
         }
+        true
     }
 
     fn l2_clock(&mut self) {
         // As usual, decrement counters and split lists
-        let mut ready_reqs: Vec<(u32, u32, L2PageReq)> = Vec::new();
-        let mut new_req_queue: HashMap<u32, HashMap<u32, L2PageReq>> = HashMap::new();
+        let mut ready_reqs: Vec<(u32, u32)> = Vec::new();
+        let mut new_req_queue: HashMap<u32, HashMap<u32, u32>> = HashMap::new();
         for (&mem_offset, reqq) in &self.l2.req_queue {
-            let mut new_cu_q: HashMap<u32, L2PageReq> = HashMap::new();
-            for (&cu_id, req) in reqq {
+            let mut new_cu_q: HashMap<u32, u32> = HashMap::new();
+            for (&cu_id, &req) in reqq {
                 let mut new_req = req.clone();
-                new_req.timer = if req.timer > 0 { req.timer - 1 } else { 0 };
-                if new_req.timer == 0 {
-                    ready_reqs.push((cu_id, mem_offset, new_req.clone()));
+                new_req = if req > 0 { req - 1 } else { 0 };
+                if new_req == 0 {
+                    ready_reqs.push((cu_id, mem_offset));
                 } else {
-                    new_cu_q.insert(cu_id, new_req.clone());
+                    new_cu_q.insert(cu_id, new_req);
                 }
             }
             if !new_cu_q.is_empty() {
@@ -1210,7 +1258,7 @@ impl GPUState {
             }
         }
         // Try to serve on ready requests
-        for (cu_id, mem_offset, req) in ready_reqs {
+        for (cu_id, mem_offset) in ready_reqs {
             let mut hit_line: Option<CacheLine> = None;
             // Try to find the page in the table
             for bin in &mut self.l2.cache_table.contents {
@@ -1225,11 +1273,8 @@ impl GPUState {
             }
             // Cache hit
             if let Some(line) = hit_line {
-                if req.l1_target {
-                    self.l1_put_line(cu_id, &line);
-                } else {
-                    self.sampler_put_line(cu_id, &line);
-                }
+                self.l1_put_line(cu_id, &line);
+                self.sampler_put_line(cu_id, &line);
             }
             // Cache miss
             else {
@@ -1242,25 +1287,55 @@ impl GPUState {
                 new_req_queue
                     .get_mut(&mem_offset)
                     .unwrap()
-                    .insert(cu_id, req.clone());
+                    .insert(cu_id, 0);
             }
         }
         self.l2.req_queue = new_req_queue;
+        // let mut new_ready_reqs: Vec<u32> = Vec::new();
+        // let wait_reqs = self.l2.wait_reqs.clone();
+        // // split lists
+        // for &req_id in &wait_reqs {
+        //     let req = self.l2.reqs[req_id as usize].as_mut().unwrap();
+        //     if req.timer == 1 {
+        //         new_ready_reqs.push(req_id);
+        //     }
+        //     req.timer = if req.timer != 0 { req.timer - 1 } else { 0 };
+        // }
+        // let mut missed_pages: Vec<(u32, u32)> = Vec::new();
+        // // Try to serve ready requests
+        // for req_id in new_ready_reqs {
+        //     self.l2.wait_reqs.remove(&req_id);
+        //     let req = self.l2.reqs[req_id as usize].clone().unwrap();
+        //     let mut hit_line: Option<CacheLine> = self.l2.cache_table.getLine(req.mem_offset);
+        //     // Try to find the page in the table
+        //     // Cache hit
+        //     if let Some(line) = hit_line {
+        //         self.l1_put_line(req.cu_id, &line);
+        //         self.sampler_put_line(req.cu_id, &line);
+        //     }
+        //     // Cache miss
+        //     else {
+        //         // Emit the request to memory
+        //         self.loadMem(req.mem_offset, self.config.DRAM_latency);
+        //         // Put the request back to the queue
+        //         if !self.l2.req_queue.contains_key(&req.mem_offset) {
+        //             self.l2.req_queue.insert(req.mem_offset, HashSet::new());
+        //         }
+        //         self.l2
+        //             .req_queue
+        //             .get_mut(&req.mem_offset)
+        //             .unwrap()
+        //             .insert(req_id);
+        //     }
+        // }
     }
     fn l2_put_line(&mut self, line: &CacheLine) {
-        // the line is in the cache so serve the requiests
-        if self.l2.req_queue.contains_key(&line.address) {
+        let requests = self.l2.req_queue.remove(&line.address);
+        if let Some(requests) = requests {
             // Serve the request
-            let reqs = self.l2.req_queue.remove_entry(&line.address).unwrap().1;
-            for (&cu_id, req) in &reqs {
-                if req.timer != 0 {
-                    continue;
-                }
-                if req.l1_target {
-                    self.l1_put_line(cu_id, &line);
-                } else {
-                    self.sampler_put_line(cu_id, &line);
-                }
+            for (cu_id, requests_id) in requests {
+                self.l1_put_line(cu_id, &line);
+                self.sampler_put_line(cu_id, &line);
             }
         }
         self.l2.cache_table.putLine(&line);
@@ -1655,7 +1730,7 @@ fn dispatch(
             rw_views: rw_views.clone(),
             samplers: samplers.clone(),
         };
-        gpu_state.dreqs.push(disp_req);
+        gpu_state.dreqs.push_back(disp_req);
     }
 }
 
@@ -1676,9 +1751,9 @@ fn clock(gpu_state: &mut GPUState) -> Option<Vec<Event>> {
             }
             cnt
         };
-        let mut deferredReq: Vec<DispatchReq> = Vec::new();
+        let mut deferredReq: VecDeque<DispatchReq> = VecDeque::new();
         while cnt_free_waves > 0 {
-            match gpu_state.dreqs.pop() {
+            match gpu_state.dreqs.pop_front() {
                 Some(req) => {
                     // @TODO: dispatch groups separately
                     // Make sure it's a power of two and no greater than 1024
@@ -1693,7 +1768,7 @@ fn clock(gpu_state: &mut GPUState) -> Option<Vec<Event>> {
 
                     let warp_count = req.group_size / gpu_state.config.wave_size;
                     if warp_count > cnt_free_waves {
-                        deferredReq.push(req);
+                        deferredReq.push_front(req);
                         continue;
                     }
                     cnt_free_waves -= warp_count;
@@ -1726,8 +1801,11 @@ fn clock(gpu_state: &mut GPUState) -> Option<Vec<Event>> {
     // @Fetch-Submit part
     // @TODO: Refactor the loop - it looks ugly
     {
+        gpu_state.l2.cache_table.reset_counters();
         // For each compute unit(they run in parallel in our imagination)
         for (cu_id, cu) in &mut gpu_state.cus.iter_mut().enumerate() {
+            cu.l1.cache_table.reset_counters();
+            cu.sampler.cache_table.reset_counters();
             let mut sampler_free_slots = cu.sampler.get_free_slots();
             // Clear some flags
             for wave in &mut cu.waves {
@@ -2914,6 +2992,12 @@ pub fn guppy_get_gpu_metric(name: String) -> f64 {
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
     match name.as_str() {
         "ALU active" => gpu_state.get_alu_active(),
+        "Samplers cache hit" => gpu_state.get_sampler_metrics().0 as f64,
+        "Samplers cache miss" => gpu_state.get_sampler_metrics().1 as f64,
+        "Samplers cache evict" => gpu_state.get_sampler_metrics().2 as f64,
+        "L2 hit" => gpu_state.l2.cache_table.hit_cnt as f64,
+        "L2 miss" => gpu_state.l2.cache_table.miss_cnt as f64,
+        "L2 evict" => gpu_state.l2.cache_table.evict_cnt as f64,
         _ => std::panic!(),
     }
 }
@@ -3079,14 +3163,14 @@ mod tests {
         let res = parse(
             r"
             mov r0.xy, thread_id
-            and r0.x, r0.x, u(1023)
-            div.u32 r0.y, r0.y, u(1024)
+            and r0.x, r0.x, u(255)
+            div.u32 r0.y, r0.y, u(256)
             mov r0.zw, r0.xy
             utof r0.xy, r0.xy
             ; add 0.5 to fit the center of the texel
             add.f32 r0.xy, r0.xy, f2(0.5 0.5)
             ; normalize coordinates
-            div.f32 r0.xy, r0.xy, f2(1024.0 1024.0)
+            div.f32 r0.xy, r0.xy, f2(256.0 256.0)
             ; tx * 2.0 - 1.0
             mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
             sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
@@ -3124,7 +3208,7 @@ mod tests {
         };
         let mut gpu_state = GPUState::new(&config);
         let TEXTURE_SIZE = 64;
-        let AMP_K = 16;
+        let AMP_K = 4;
         {
             let mut mem: Vec<u32> = Vec::new();
             for i in 0..16 {
@@ -3172,34 +3256,34 @@ mod tests {
             (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
         while let Some(events) = clock(&mut gpu_state) {
+            // println!("{:?}", gpu_state.l2.cache_table.miss_cnt);
             if events.len() != 0 {
-                // println!("{:?}", events);
                 //}
 
-                for event in &events {
-                    match event {
-                        Event::WAVE_RETIRED((cu_id, wave_id)) => {
-                            print!(
-                                " clocks:{}",
-                                gpu_state.cus[*cu_id as usize].waves[*wave_id as usize]
-                                    .clock_counter
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                println!();
+                // for event in &events {
+                //     match event {
+                //         Event::WAVE_RETIRED((cu_id, wave_id)) => {
+                //             print!(
+                //                 " clocks:{}",
+                //                 gpu_state.cus[*cu_id as usize].waves[*wave_id as usize]
+                //                     .clock_counter
+                //             );
+                //         }
+                //         _ => {}
+                //     }
+                // }
+                // println!();
             }
             // println!(
             //                 "{:?},",
-            //                 gpu_state.cus[0].sampler.free_reqs.len()
-            //                 // gpu_state.cus[0].waves[1].vgprfs[1].iter().map(|reg| {
-            //                 //             if reg.locked {
-            //                 //                 1
-            //                 //             } else {
-            //                 //                 0
-            //                 //             }
-            //                 //         }).collect::<Vec<_>>()
+            //                 // gpu_state.cus[0].sampler.free_reqs.len()
+            //                 gpu_state.cus[0].waves[1].vgprfs[1].iter().map(|reg| {
+            //                             if reg.locked {
+            //                                 1
+            //                             } else {
+            //                                 0
+            //                             }
+            //                         }).collect::<Vec<_>>()
             //             );
             //println!("{:?}", gpu_state.get_alu_active());
         }

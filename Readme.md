@@ -1,16 +1,23 @@
 # Toy GPU emulator
 ## Build
 ```console
-cd https://github.com/aschrein/guppy && cd guppy
+git clone https://github.com/aschrein/guppy && cd guppy
+rustup default nightly
+rustup target add wasm32-unknown-unknown --toolchain nightly
 wasm-pack build
 cd www
 npm install && npm run start
 ```
+## Profile a test on linux-x86 target
+```console
+perf record -F99 --call-graph dwarf cargo test mem_test_texture
+perf report
+```
 ___
 ## Features
 * Approximates clock cycle cost of instructions
-    * ALU latency
-    * Sampler/L1/L2/memory latency
+    * ALU latency/pipeline
+    * Sampler/L1/L2/memory cache hit/miss latency
 * Read only/Write only memory operations
 * Branching
     * Implemented with mask stack
@@ -35,7 +42,7 @@ DRAM -> L2 -+
             |_ ...
 ```
 ___
-## Example
+## Examples of assembly
 ```assembly
 mov r1.x, thread_id
 mul.u32 r1.x, r1.x, u(4)
@@ -91,7 +98,7 @@ ret
 ```
 # TODOLIST
 * ~~Write tests for RAW, WAW and WAR register hazards, check for antidependency~~
-* Add ALU pipelining
+* ~~Add ALU pipelining~~
     * chime variability?
 * Register bankning?
 * shuffle instructions
@@ -106,7 +113,7 @@ ret
     * ~~gather/scatter merging~~
     * ~~cache system~~
         * banks
-    * sampling system
+    * ~~sampling system~~
     * atomic operations
         * cache line collision resolution between L1s(false sharing/coalescing)
 * thread group instructions

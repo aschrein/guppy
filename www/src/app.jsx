@@ -278,17 +278,25 @@ class Memory extends React.Component {
 }
 
 class CanvasComponent extends React.Component {
-    componentDidMount() {
+
+    constructor(props, context) {
+        super(props, context);
         this.neededWidth = 512;
         this.neededHeight = 512;
         this.updateCanvas = this.updateCanvas.bind(this);
         this.onResize = this.onResize.bind(this);
+        this.scheduleDraw = this.scheduleDraw.bind(this);
+    }
+
+    componentDidMount() {
+        this.draw = true;
         this.ctx = this.refs.canvas.getContext('2d');
         this.canvas = this.refs.canvas;
+        this.lastClock = 0;
         this.props.glContainer.on('resize', this.onResize);
         this.globals = this.props.globals;
         this.globals().updateCanvas = this.updateCanvas;
-
+        
         this.updateCanvas();
     }
 
@@ -300,7 +308,15 @@ class CanvasComponent extends React.Component {
         this.updateCanvas();
     }
 
+    scheduleDraw() {
+        this.draw = true;
+        this.updateCanvas();
+    }
     updateCanvas() {
+        if (!this.draw) {
+            return;
+        }
+        this.draw = false;
         this.canvas.width = this.neededWidth;
         this.canvas.height = this.neededHeight;
         this.ctx.fillStyle = "#222222";
@@ -366,7 +382,7 @@ class CanvasComponent extends React.Component {
                         } else {
                             this.ctx.fillStyle = "black";
                         }
-                        this.ctx.fillRect(x, y, 2, 2);
+                        this.ctx.fillRect(x, y, 1, 1);
                         y += 1;
                     }
                     x += 1;
@@ -374,10 +390,111 @@ class CanvasComponent extends React.Component {
                 this.neededWidth = Math.max(this.neededWidth, x);
             }
         }
-
+        if (this.globals().l2_metric_history) {
+            let history = this.globals().l2_metric_history;
+            if (history.length > 0) {
+                
+                var canvas = this.ctx;
+                canvas.font = "14px Monaco, monospace";
+                var welcomeMessage = "L2 metric history";
+                canvas.textAlign = "start";
+                canvas.textBaseline = "top";
+                canvas.fillStyle = "#ffffff";
+                canvas.fillText(welcomeMessage, 0, y + 16);
+                var exec_mask_offset = y + 32;
+                x = 0;
+                var max = 0;
+                for (var i = 0; i < history.length; i++) {
+                    max = Math.max(max, history[i][0], history[i][1], history[i][2]);
+                }
+                // console.log(max);
+                for (var i = 0; i < history.length; i++) {
+                    this.neededHeight = Math.max(this.neededHeight, y);
+                    y = exec_mask_offset;
+                    let hit = 100.0 * history[i][0] / max;
+                    let miss = 100.0 * history[i][1] / max;
+                    let evict = 100.0 * history[i][2] / max;
+                    for (var j = 100; j >= 0; j--) {
+                        var r = 0;
+                        var g = 0;
+                        var b = 0;
+                        if (j <= hit) {
+                            r = 255.0;
+                        }
+                        if (j <= miss) {
+                            g = 255.0;
+                        }
+                        if (j <= evict) {
+                            b = 255.0;
+                        }
+                        this.ctx.fillStyle = 'rgb(' +
+                        Math.floor(r) + ', ' +
+                        Math.floor(g) + ', ' +
+                        Math.floor(b) + ')';
+                        this.ctx.fillRect(x, y, 1, 1);
+                        y += 1;
+                    }
+                    x += 1;
+                }
+                this.neededWidth = Math.max(this.neededWidth, x);
+            }
+        }
+        if (this.globals().samplers_metric_history) {
+            let history = this.globals().samplers_metric_history;
+            if (history.length > 0) {
+                
+                var canvas = this.ctx;
+                canvas.font = "14px Monaco, monospace";
+                var welcomeMessage = "Samplers metric history";
+                canvas.textAlign = "start";
+                canvas.textBaseline = "top";
+                canvas.fillStyle = "#ffffff";
+                canvas.fillText(welcomeMessage, 0, y + 16);
+                var exec_mask_offset = y + 32;
+                x = 0;
+                var max = 0;
+                for (var i = 0; i < history.length; i++) {
+                    max = Math.max(max, history[i][0], history[i][1], history[i][2]);
+                }
+                // console.log(max);
+                for (var i = 0; i < history.length; i++) {
+                    this.neededHeight = Math.max(this.neededHeight, y);
+                    y = exec_mask_offset;
+                    let hit = 100.0 * history[i][0] / max;
+                    let miss = 100.0 * history[i][1] / max;
+                    let evict = 100.0 * history[i][2] / max;
+                    for (var j = 100; j >= 0; j--) {
+                        var r = 0;
+                        var g = 0;
+                        var b = 0;
+                        if (j <= hit) {
+                            r = 255.0;
+                        }
+                        if (j <= miss) {
+                            g = 255.0;
+                        }
+                        if (j <= evict) {
+                            b = 255.0;
+                        }
+                        this.ctx.fillStyle = 'rgb(' +
+                        Math.floor(r) + ', ' +
+                        Math.floor(g) + ', ' +
+                        Math.floor(b) + ')';
+                        this.ctx.fillRect(x, y, 1, 1);
+                        y += 1;
+                    }
+                    x += 1;
+                }
+                this.neededWidth = Math.max(this.neededWidth, x);
+            }
+        }
     }
     render() {
-        return <canvas ref="canvas" />;
+        return <div>
+            <button style={{ margin: 10 }} onClick={this.scheduleDraw}>
+                    Draw
+            </button>
+            <canvas ref="canvas" /> </div>;
     }
 }
 class GoldenLayoutWrapper extends React.Component {
@@ -389,9 +506,19 @@ class GoldenLayoutWrapper extends React.Component {
                 } else {
                     this.globals.active_mask_history.push(this.globals.wasm.guppy_get_active_mask());
                     this.globals.alu_active_history.push(this.globals.wasm.guppy_get_gpu_metric("ALU active"));
+                    this.globals.samplers_metric_history.push([
+                        this.globals.wasm.guppy_get_gpu_metric("Samplers cache hit"),
+                        this.globals.wasm.guppy_get_gpu_metric("Samplers cache miss"),
+                        this.globals.wasm.guppy_get_gpu_metric("Samplers cache evict"),
+                    ]);
+                    this.globals.l2_metric_history.push([
+                        this.globals.wasm.guppy_get_gpu_metric("L2 hit"),
+                        this.globals.wasm.guppy_get_gpu_metric("L2 miss"),
+                        this.globals.wasm.guppy_get_gpu_metric("L2 evict"),
+                    ]);
                     //if (this.globals.updateCanvas)
                     this.globals.updateMemory();
-                    this.globals.updateCanvas();
+                    // this.globals.updateCanvas();
                 }
             }
         }
@@ -401,16 +528,18 @@ class GoldenLayoutWrapper extends React.Component {
         this.globals.dispatchConfig = {
             "group_size": 32, "groups_count": 2048, "cycles_per_iter": 4 };
         this.globals.gpuConfig = {
-            "DRAM_latency": 1,
-            "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 1,
-            "L2_size": 4 * 1024 * 1024, "L2_latency": 1, "sampler_cache_size": 1024 * 1024,
-            "sampler_latency": 1, "VGPRF_per_pe": 8, "wave_size": 32,
-            "CU_count": 12, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
-            "ALU_pipe_len": 1
+            "DRAM_latency": 16,
+            "DRAM_bandwidth": 2048, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 8 * 1024, "L2_latency": 8, "sampler_cache_size": 4 * 1024,
+            "sampler_latency": 4, "VGPRF_per_pe": 8, "wave_size": 32,
+            "CU_count": 4, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
+            "ALU_pipe_len": 2
         };
         this.globals.wasm = null;
         this.globals.r_images = [];
         this.globals.active_mask_history = null;
+        this.globals.samplers_metric_history = null;
+        this.globals.l2_metric_history = null;
         this.globals.alu_active_history = null;
 
         this.intervalId = setInterval(this.timer.bind(this), 1);
@@ -461,6 +590,8 @@ class GoldenLayoutWrapper extends React.Component {
                 JSON.stringify(globals.gpuConfig));
             globals.active_mask_history = [];
             globals.alu_active_history = [];
+            globals.samplers_metric_history = [];
+            globals.l2_metric_history = [];
         }
         _wasm.then(wasm => {
             layout.updateSize();
