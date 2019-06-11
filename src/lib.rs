@@ -88,6 +88,15 @@ fn LTU32(this: &Value, that: &Value) -> Value {
     ]
 }
 
+fn GTU32(this: &Value, that: &Value) -> Value {
+    [
+        if this[0] > that[0] { 1 } else { 0 },
+        if this[1] > that[1] { 1 } else { 0 },
+        if this[2] > that[2] { 1 } else { 0 },
+        if this[3] > that[3] { 1 } else { 0 },
+    ]
+}
+
 fn ORU32(this: &Value, that: &Value) -> Value {
     [
         this[0] | that[0],
@@ -103,6 +112,15 @@ fn ANDU32(this: &Value, that: &Value) -> Value {
         this[1] & that[1],
         this[2] & that[2],
         this[3] & that[3],
+    ]
+}
+
+fn MadU32(x1: &Value, x2: &Value, x3: &Value) -> Value {
+    [
+        x1[0] * x2[0] + x3[0],
+        x1[1] * x2[1] + x3[1],
+        x1[2] * x2[2] + x3[2],
+        x1[3] * x2[3] + x3[3],
     ]
 }
 
@@ -163,6 +181,78 @@ fn LTF32(this_: &Value, that_: &Value) -> Value {
         if this[2] < that[2] { 1 } else { 0 },
         if this[3] < that[3] { 1 } else { 0 },
     ]
+}
+
+fn GTF32(this_: &Value, that_: &Value) -> Value {
+    let this = castToFValue(this_);
+    let that = castToFValue(that_);
+    [
+        if this[0] > that[0] { 1 } else { 0 },
+        if this[1] > that[1] { 1 } else { 0 },
+        if this[2] > that[2] { 1 } else { 0 },
+        if this[3] > that[3] { 1 } else { 0 },
+    ]
+}
+
+fn Clamp(this_: &Value) -> Value {
+    let this = castToFValue(this_);
+    castToValue(&[
+        if this[0] > 1.0 { 1.0 } else if this[0] < 0.0 { 0.0 } else {this[0]},
+        if this[1] > 1.0 { 1.0 } else if this[1] < 0.0 { 0.0 } else {this[1]},
+        if this[2] > 1.0 { 1.0 } else if this[2] < 0.0 { 0.0 } else {this[2]},
+        if this[3] > 1.0 { 1.0 } else if this[3] < 0.0 { 0.0 } else {this[3]},
+    ])
+}
+
+fn Norm(this_: &Value) -> Value {
+    let x = castToFValue(this_);
+    let len = f32::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]);
+    // @TODO: Do something clever here?
+    if len == 0.0 {
+        [0, 0, 0, 0]
+    } else {
+        castToValue(&[x[0] / len, x[1] / len, x[2] / len, x[3] / len])
+    }
+}
+
+fn Len(this_: &Value) -> Value {
+    let x = castToFValue(this_);
+    let len = f32::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]);
+        castToValue(&[len,  len,  len, len])
+}
+
+fn AbsF32(this_: &Value) -> Value {
+    let x = castToFValue(this_);
+
+    castToValue(&[
+        f32::abs(x[0]),
+        f32::abs(x[1]),
+        f32::abs(x[2]),
+        f32::abs(x[3]),
+    ])
+}
+
+fn MadF32(x1_: &Value, x2_: &Value, x3_: &Value) -> Value {
+    let x1 = castToFValue(x1_);
+    let x2 = castToFValue(x2_);
+    let x3 = castToFValue(x3_);
+    castToValue(&[
+        x1[0] * x2[0] + x3[0],
+        x1[1] * x2[1] + x3[1],
+        x1[2] * x2[2] + x3[2],
+        x1[3] * x2[3] + x3[3],
+    ])
+}
+
+fn LerpF32(x1_: &Value, x2_: &Value, x3_: &Value) -> Value {
+    let x1 = castToFValue(x1_);
+    let x2 = castToFValue(x2_);
+    let x3 = castToFValue(&Clamp(&x3_));
+    let mut val = [0.0, 0.0, 0.0, 0.0];
+    for i in 0..4 {
+        val[i] = x1[i] * x3[i] + x2[i] * (1.0 - x3[i]);
+    }
+    castToValue(&val)
 }
 
 fn castToValue(fval: &FValue) -> Value {
@@ -1377,11 +1467,48 @@ impl GPUState {
             let exec_mask = &dispInst.exec_mask.as_ref().unwrap();
             let inst = dispInst.instr.unwrap();
             match &inst.ty {
+                InstTy::MAD | InstTy::LERP => {
+                    let src1 = dispInst.src[0].as_ref().unwrap();
+                    let src2 = dispInst.src[1].as_ref().unwrap();
+                    let src3 = dispInst.src[2].as_ref().unwrap();
+                    let dst = match &inst.ops[0] {
+                        Operand::VRegister(dst) => dst,
+                        _ => std::panic!(""),
+                    };
+                    let result = {
+                        src1.iter()
+                            .zip(src2.iter())
+                            .zip(src3.iter())
+                            .map(|((&x1, &x2), &x3)| match inst.interp {
+                                Interpretation::F32 => match inst.ty {
+                                    InstTy::MAD => MadF32(&x1, &x2, &x3),
+                                    InstTy::LERP => LerpF32(&x1, &x2, &x3),
+                                    _ => std::panic!(""),
+                                },
+                                Interpretation::U32 => match inst.ty {
+                                    InstTy::MAD => MadU32(&x1, &x2, &x3),
+                                    _ => std::panic!(""),
+                                },
+
+                                _ => std::panic!(""),
+                            })
+                            .collect::<Vec<Value>>()
+                    };
+                    assert!(wave.vgprfs[dst.id as usize].len() == result.len());
+                    // Registers should be unlocked by this time
+                    for (i, item) in &mut wave.vgprfs[dst.id as usize].iter_mut().enumerate() {
+                        if exec_mask[i as usize] {
+                            applyWriteSwizzle(&mut item.val, &result[i], &dst.comps);
+                            item.locked = false;
+                        }
+                    }
+                }
                 InstTy::ADD
                 | InstTy::SUB
                 | InstTy::MUL
                 | InstTy::DIV
                 | InstTy::LT
+                | InstTy::GT
                 | InstTy::OR
                 | InstTy::AND => {
                     let src1 = dispInst.src[0].as_ref().unwrap();
@@ -1402,6 +1529,7 @@ impl GPUState {
                                     InstTy::MUL => MulF32(&x1, &x2),
                                     InstTy::DIV => DivF32(&x1, &x2),
                                     InstTy::LT => LTF32(&x1, &x2),
+                                    InstTy::GT => GTF32(&x1, &x2),
                                     _ => std::panic!(""),
                                 },
                                 Interpretation::U32 => match inst.ty {
@@ -1410,6 +1538,7 @@ impl GPUState {
                                     InstTy::MUL => MulU32(&x1, &x2),
                                     InstTy::DIV => DivU32(&x1, &x2),
                                     InstTy::LT => LTU32(&x1, &x2),
+                                    InstTy::GT => GTU32(&x1, &x2),
                                     InstTy::OR => ORU32(&x1, &x2),
                                     InstTy::AND => ANDU32(&x1, &x2),
                                     _ => std::panic!(""),
@@ -1428,7 +1557,7 @@ impl GPUState {
                         }
                     }
                 }
-                InstTy::MOV | InstTy::UTOF => {
+                InstTy::MOV | InstTy::UTOF | InstTy::NORM | InstTy::ABS | InstTy::LEN | InstTy::CLAMP => {
                     let src1 = dispInst.src[0].as_ref().unwrap();
                     let dst = match &inst.ops[0] {
                         Operand::VRegister(dst) => dst,
@@ -1441,6 +1570,13 @@ impl GPUState {
                             let src = match &inst.ty {
                                 InstTy::MOV => src1[i],
                                 InstTy::UTOF => U2F(&src1[i]),
+                                InstTy::NORM => Norm(&src1[i]),
+                                InstTy::LEN => Len(&src1[i]),
+                                InstTy::CLAMP => Clamp(&src1[i]),
+                                InstTy::ABS => match inst.interp {
+                                    Interpretation::F32 => AbsF32(&src1[i]),
+                                    _ => std::panic!(""),
+                                },
                                 _ => std::panic!(""),
                             };
                             applyWriteSwizzle(&mut item.val, &src, &dst.comps);
@@ -1520,13 +1656,14 @@ impl GPUState {
             | InstTy::MUL
             | InstTy::DIV
             | InstTy::LT
+            | InstTy::GT
             | InstTy::OR
             | InstTy::AND
             | InstTy::ST
             | InstTy::LD => {
                 inst.assertThreeOp();
             }
-            InstTy::SAMPLE => {
+            InstTy::SAMPLE | InstTy::MAD| InstTy::LERP => {
                 inst.assertFourOp();
             }
             InstTy::BR_PUSH
@@ -1537,7 +1674,7 @@ impl GPUState {
             | InstTy::MASK_NZ => {
                 control_flow_cmd = true;
             }
-            InstTy::MOV | InstTy::UTOF => {
+            InstTy::MOV | InstTy::UTOF | InstTy::NORM  | InstTy::ABS | InstTy::LEN| InstTy::CLAMP => {
                 inst.assertTwoOp();
             }
             _ => {
@@ -1682,93 +1819,85 @@ impl GPUState {
             }
         } else if let InstTy::ST = inst.ty {
             let addr = wave.getValues(&inst.ops[1]);
-            if let Operand::VRegister(src) = &inst.ops[2] {
-                for (i, item) in wave.vgprfs[src.id as usize].iter_mut().enumerate() {
-                    if wave.exec_mask[i] {
-                        // item.locked = true;
-                        let (mem_offsets, mem_vals) = match &inst.ops[0] {
-                            Operand::RWMemory(rm) => {
-                                match &wave.rw_views[rm.id as usize] {
-                                    View::BUFFER(buf) => {
-                                        // Align at dword
-                                        assert!(addr[i][0] % 4 == 0);
-                                        let mem_offset = (buf.offset + addr[i][0]) / 4;
-                                        let mut val: Value = [0, 0, 0, 0];
-                                        applyWriteSwizzle(
-                                            &mut val,
-                                            &[
-                                                mem_offset,
-                                                mem_offset + 1,
-                                                mem_offset + 2,
-                                                mem_offset + 3,
-                                            ],
-                                            &rm.comps,
-                                        );
-                                        // Boundary checks
-                                        for i in 0..4 {
-                                            if val[i] > 0 {
-                                                assert!(
-                                                    val[i] * 4 >= buf.offset
-                                                        && val[i] * 4 < buf.offset + buf.size
-                                                );
-                                            }
+            let values = wave.getValues(&inst.ops[2]);
+            for i in 0..self.config.wave_size as usize {
+                if wave.exec_mask[i] {
+                    // item.locked = true;
+                    let (mem_offsets, mem_vals) = match &inst.ops[0] {
+                        Operand::RWMemory(rm) => {
+                            match &wave.rw_views[rm.id as usize] {
+                                View::BUFFER(buf) => {
+                                    // Align at dword
+                                    assert!(addr[i][0] % 4 == 0);
+                                    let mem_offset = (buf.offset + addr[i][0]) / 4;
+                                    let mut val: Value = [0, 0, 0, 0];
+                                    applyWriteSwizzle(
+                                        &mut val,
+                                        &[
+                                            mem_offset,
+                                            mem_offset + 1,
+                                            mem_offset + 2,
+                                            mem_offset + 3,
+                                        ],
+                                        &rm.comps,
+                                    );
+                                    // Boundary checks
+                                    for i in 0..4 {
+                                        if val[i] > 0 {
+                                            assert!(
+                                                val[i] * 4 >= buf.offset
+                                                    && val[i] * 4 < buf.offset + buf.size
+                                            );
                                         }
-                                        let regval = applyReadSwizzle(&item.val, &src.comps);
-                                        (val, regval)
                                     }
-                                    View::TEXTURE2D(tex) => {
-                                        let mem_offset = (tex.offset + addr[i][0]) / 4;
-                                        let mut mem_offsets: Value = [0, 0, 0, 0];
-                                        let regval = applyReadSwizzle(&item.val, &src.comps);
-                                        let mut mem_vals: Value = [0, 0, 0, 0];
-                                        match tex.format {
-                                            TextureFormat::RGBA8_UNORM => {
-                                                mem_offsets[0] = (tex.offset
-                                                    + tex.pitch * addr[i][1]
-                                                    + addr[i][0] * 4)
-                                                    / 4;
-                                                mem_vals[0] = unsafe {
-                                                    (((std::mem::transmute_copy::<u32, f32>(
-                                                        &regval[0],
-                                                    ) * 255.0)
-                                                        as u32)
-                                                        << 24)
-                                                        | (((std::mem::transmute_copy::<u32, f32>(
-                                                            &regval[1],
-                                                        ) * 255.0)
-                                                            as u32)
-                                                            << 16)
-                                                        | (((std::mem::transmute_copy::<u32, f32>(
-                                                            &regval[2],
-                                                        ) * 255.0)
-                                                            as u32)
-                                                            << 8)
-                                                        | (((std::mem::transmute_copy::<u32, f32>(
-                                                            &regval[3],
-                                                        ) * 255.0)
-                                                            as u32)
-                                                            << 0)
-                                                };
-                                            }
-                                            _ => std::panic!(""),
-                                        };
-                                        (mem_offsets, mem_vals)
-                                    }
-                                    _ => std::panic!(""),
+                                    let regval = values[i];
+                                    (val, regval)
                                 }
+                                View::TEXTURE2D(tex) => {
+                                    let mem_offset = (tex.offset + addr[i][0]) / 4;
+                                    let mut mem_offsets: Value = [0, 0, 0, 0];
+                                    let regval = values[i];
+                                    let mut mem_vals: Value = [0, 0, 0, 0];
+                                    let clamp = |a: u32| unsafe {
+                                        let mut f = std::mem::transmute_copy::<u32, f32>(&a);
+                                        f = if f < 0.0 {
+                                            0.0
+                                        } else if f > 1.0 {
+                                            1.0
+                                        } else {
+                                            f
+                                        };
+                                        (f * 255.0) as u32
+                                    };
+                                    match tex.format {
+                                        TextureFormat::RGBA8_UNORM => {
+                                            mem_offsets[0] = (tex.offset
+                                                + tex.pitch * addr[i][1]
+                                                + addr[i][0] * 4)
+                                                / 4;
+                                            mem_vals[0] = unsafe {
+                                                (clamp(regval[0]) << 24)
+                                                    | (clamp(regval[1]) << 16)
+                                                    | (clamp(regval[2]) << 8)
+                                                    | (clamp(regval[3]) << 0)
+                                            };
+                                        }
+                                        _ => std::panic!(""),
+                                    };
+                                    (mem_offsets, mem_vals)
+                                }
+                                _ => std::panic!(""),
                             }
-                            _ => std::panic!(""),
-                        };
+                        }
+                        _ => std::panic!(""),
+                    };
 
-                        for i in 0..4 {
-                            if mem_offsets[i] != 0 {
-                                self.mem[mem_offsets[i] as usize] = mem_vals[i];
-                            }
+                    for i in 0..4 {
+                        if mem_offsets[i] != 0 {
+                            self.mem[mem_offsets[i] as usize] = mem_vals[i];
                         }
                     }
                 }
-            } else {
-                std::panic!("")
             }
             wave.pc += 1;
             wave.has_been_dispatched = true;
@@ -1894,12 +2023,19 @@ impl GPUState {
                 match &inst.ty {
                     InstTy::ADD
                     | InstTy::SUB
+                    | InstTy::ABS
                     | InstTy::MUL
+                    | InstTy::MAD
+                    | InstTy::LERP
                     | InstTy::DIV
+                    | InstTy::NORM
                     | InstTy::OR
                     | InstTy::AND
                     | InstTy::LT
+                    | InstTy::GT
                     | InstTy::MOV
+                    | InstTy::CLAMP
+                    | InstTy::LEN
                     | InstTy::UTOF => {
                         if let Operand::VRegister(dst) = &inst.ops[0] {
                             for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate() {
@@ -1952,7 +2088,6 @@ impl GPUState {
             cu.l1.cache_table.reset_counters();
             cu.sampler.cache_table.reset_counters();
         }
-        
 
         for wave in &mut self.cus[cu_id as usize].waves {
             wave.has_been_dispatched = false;
@@ -1977,7 +2112,6 @@ impl GPUState {
                 self.wave_gather(*cu_id, *wave_id, gather);
             }
         }
-        
         self.l1_clock(cu_id as u32);
         self.sampler_clock(cu_id as u32);
         for valu_id in 0..self.cus[cu_id as usize].valus.len() {
@@ -2174,9 +2308,14 @@ enum Operand {
 #[derive(Debug, Clone, PartialEq)]
 enum InstTy {
     MOV,
+    LEN,
+    LERP,
+    CLAMP,
+    ABS,
     ADD,
     SUB,
     MUL,
+    MAD,
     DIV,
     AND,
     OR,
@@ -2189,6 +2328,7 @@ enum InstTy {
     DISCARD,
     UTOF,
     LT,
+    GT,
     BR_PUSH,
     PUSH_MASK,
     POP_MASK,
@@ -2422,11 +2562,11 @@ fn clock(gpu_state: &mut GPUState) -> Option<Vec<Event>> {
     gpu_state.l2_clock();
     gpu_state.mem_clock();
     gpu_state.clock_counter += 1;
-    let gpu_active = gpu_state.dreqs.len() != 0 || gpu_state.cus.iter().any(|cu| {
-        cu.waves.iter().any(|wave| {
-            wave.enabled
-        })
-    });
+    let gpu_active = gpu_state.dreqs.len() != 0
+        || gpu_state
+            .cus
+            .iter()
+            .any(|cu| cu.waves.iter().any(|wave| wave.enabled));
     if gpu_active {
         Some(events)
     } else {
@@ -2591,7 +2731,7 @@ fn parse(text: &str) -> Vec<Instruction> {
                 ImmediateVal::V3F(
                     x.get(1).unwrap().as_str().parse::<f32>().unwrap(),
                     x.get(2).unwrap().as_str().parse::<f32>().unwrap(),
-                    x.get(4).unwrap().as_str().parse::<f32>().unwrap(),
+                    x.get(3).unwrap().as_str().parse::<f32>().unwrap(),
                 )
             });
         } else if let Some(x) = V2FRE.captures(s) {
@@ -2621,10 +2761,9 @@ fn parse(text: &str) -> Vec<Instruction> {
     for (line_num, line) in lines {
         let normalized = garbageRE.replace_all(line.clone(), " ");
         if let Some(s) = labelRE.captures(&normalized) {
-            // Label points to the next line
             label_map.insert(String::from(s.get(1).unwrap().as_str()), line_num + 1);
         } else {
-            instructions.push((line_num, String::from(normalized)));
+            instructions.push((line_num + 1, String::from(normalized)));
         }
     }
     for (line_num, line) in instructions {
@@ -2651,17 +2790,24 @@ fn parse(text: &str) -> Vec<Instruction> {
         };
         // println!("{:?}", operands);
         let instr = match command.as_str() {
-            "mov" | "utof" => {
+            "mov" | "utof" | "norm" | "abs.f32" | "len" | "clamp"  => {
                 assert!(operands.len() == 2);
                 let dstRef = parseOperand(&operands[0]);
                 let srcRef = parseOperand(&operands[1]);
                 Instruction {
                     ty: match command.as_str() {
                         "mov" => InstTy::MOV,
+                        "clamp" => InstTy::CLAMP,
                         "utof" => InstTy::UTOF,
+                        "norm" => InstTy::NORM,
+                        "abs.f32" => InstTy::ABS,
+                        "len" => InstTy::LEN,
                         _ => std::panic!(""),
                     },
-                    interp: Interpretation::NONE,
+                    interp: match command.as_str() {
+                        "abs.f32" => Interpretation::F32,
+                        _ => Interpretation::NONE,
+                    },
                     line: line_num as u32,
                     ops: [dstRef, srcRef, Operand::NONE, Operand::NONE],
                 }
@@ -2724,7 +2870,7 @@ fn parse(text: &str) -> Vec<Instruction> {
                 }
             }
 
-            "add.f32" | "sub.f32" | "mul.f32" | "div.f32" | "lt.f32" => {
+            "add.f32" | "sub.f32" | "mul.f32" | "div.f32" | "lt.f32" | "gt.f32" => {
                 assert!(operands.len() == 3);
                 let dstRef = parseOperand(&operands[0]);
                 let src1Ref = parseOperand(&operands[1]);
@@ -2736,6 +2882,7 @@ fn parse(text: &str) -> Vec<Instruction> {
                         "mul.f32" => InstTy::MUL,
                         "div.f32" => InstTy::DIV,
                         "lt.f32" => InstTy::LT,
+                        "gt.f32" => InstTy::GT,
                         _ => std::panic!(""),
                     },
                     interp: Interpretation::F32,
@@ -2743,7 +2890,7 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
                 }
             }
-            "add.u32" | "sub.u32" | "mul.u32" | "div.u32" | "lt.u32" | "and" | "or" => {
+            "add.u32" | "sub.u32" | "mul.u32" | "div.u32" | "lt.u32" | "and" | "or" | "gt.u32" => {
                 assert!(operands.len() == 3);
                 let dstRef = parseOperand(&operands[0]);
                 let src1Ref = parseOperand(&operands[1]);
@@ -2755,6 +2902,7 @@ fn parse(text: &str) -> Vec<Instruction> {
                         "mul.u32" => InstTy::MUL,
                         "div.u32" => InstTy::DIV,
                         "lt.u32" => InstTy::LT,
+                        "gt.u32" => InstTy::GT,
                         "and" => InstTy::AND,
                         "or" => InstTy::OR,
                         _ => std::panic!(""),
@@ -2764,7 +2912,36 @@ fn parse(text: &str) -> Vec<Instruction> {
                     ops: [dstRef, src1Ref, src2Ref, Operand::NONE],
                 }
             }
-
+            "mad.u32" | "mad.f32" => {
+                assert!(operands.len() == 4);
+                let dstRef = parseOperand(&operands[0]);
+                let src1Ref = parseOperand(&operands[1]);
+                let src2Ref = parseOperand(&operands[2]);
+                let src4Ref = parseOperand(&operands[3]);
+                Instruction {
+                    ty: InstTy::MAD,
+                    interp: match command.as_str() {
+                        "mad.u32" => Interpretation::U32,
+                        "mad.f32" => Interpretation::F32,
+                        _ => std::panic!(),
+                    },
+                    line: line_num as u32,
+                    ops: [dstRef, src1Ref, src2Ref, src4Ref],
+                }
+            }
+            "lerp" => {
+                assert!(operands.len() == 4);
+                let dstRef = parseOperand(&operands[0]);
+                let src1Ref = parseOperand(&operands[1]);
+                let src2Ref = parseOperand(&operands[2]);
+                let src4Ref = parseOperand(&operands[3]);
+                Instruction {
+                    ty: InstTy::LERP,
+                    interp: Interpretation::F32,
+                    line: line_num as u32,
+                    ops: [dstRef, src1Ref, src2Ref, src4Ref],
+                }
+            }
             "jmp" | "push_mask" => {
                 assert!(operands.len() == 1);
                 let label = label_map.get(&operands[0]).unwrap();
@@ -2825,12 +3002,21 @@ fn parse(text: &str) -> Vec<Instruction> {
     for (i, inst) in out.iter().enumerate() {
         line_map.insert(inst.line, i as u32);
     }
+    let mut label_line_map: HashMap<u32, u32> = HashMap::new();
+    for (label, line) in &label_map {
+        for inst in &out {
+            if inst.line >= *line as u32 {
+                label_line_map.insert(*line as u32, inst.line as u32);
+                break;
+            }
+        }
+    }
     for inst in &mut out {
         if InstTy::BR_PUSH == inst.ty {
             let new_indices = match (&inst.ops[1], &inst.ops[2]) {
                 (Operand::Label(else_label), Operand::Label(converge_label)) => (
-                    *line_map.get(else_label).unwrap(),
-                    *line_map.get(converge_label).unwrap(),
+                    *line_map.get(&label_line_map.get(else_label).unwrap()).unwrap(),
+                    *line_map.get(&label_line_map.get(converge_label).unwrap()).unwrap(),
                 ),
                 _ => panic!(""),
             };
@@ -2838,11 +3024,15 @@ fn parse(text: &str) -> Vec<Instruction> {
             inst.ops[2] = Operand::Label(new_indices.1);
         }
         if InstTy::JMP == inst.ty || InstTy::PUSH_MASK == inst.ty {
+            // println!("{:?}", inst.ops[0]);
+            // println!("{:?}", line_map);
             let new_indices = match &inst.ops[0] {
-                Operand::Label(label) => (*line_map.get(label).unwrap(),),
+                Operand::Label(label) => {
+                    *line_map.get(&label_line_map.get(label).unwrap()).unwrap()
+                }
                 _ => panic!(""),
             };
-            inst.ops[0] = Operand::Label(new_indices.0);
+            inst.ops[0] = Operand::Label(new_indices);
         }
     }
     out
@@ -2859,12 +3049,19 @@ fn getLatency(ty: &InstTy) -> u32 {
         InstTy::ADD
         | InstTy::SUB
         | InstTy::MOV
+        | InstTy::CLAMP
+        | InstTy::LEN
         | InstTy::UTOF
         | InstTy::LT
+        | InstTy::GT
         | InstTy::AND
+        | InstTy::ABS
         | InstTy::OR => 1,
         InstTy::MUL => 2,
+        InstTy::MAD => 2,
+        InstTy::LERP => 2,
         InstTy::DIV => 4,
+        InstTy::NORM => 4,
         _ => panic!(""),
     }
 }
@@ -3075,10 +3272,10 @@ pub fn guppy_put_image(base64: String) -> u32 {
         format: TextureFormat::RGBA8_UNORM,
     }));
     for i in 0..image.len() / 4 {
-        let b0 = image[i * 4];
-        let b1 = image[i * 4 + 1];
-        let b2 = image[i * 4 + 2];
-        let b3 = image[i * 4 + 3];
+        let b3 = image[i * 4];
+        let b2 = image[i * 4 + 1];
+        let b1 = image[i * 4 + 2];
+        let b0 = image[i * 4 + 3];
         let val: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
         gpu_state.mem.push(val);
     }
@@ -3118,10 +3315,10 @@ pub fn guppy_get_image(id: u32, read: bool) -> String {
             let b1 = ((pixel >> 8) & 0xff) as u8;
             let b2 = ((pixel >> 16) & 0xff) as u8;
             let b3 = ((pixel >> 24) & 0xff) as u8;
-            buf.push(b0);
-            buf.push(b1);
-            buf.push(b2);
             buf.push(b3);
+            buf.push(b2);
+            buf.push(b1);
+            buf.push(b0);
         }
     }
     let mut bytes: Vec<u8> = Vec::new();
@@ -3173,32 +3370,122 @@ mod tests {
     fn mem_dummy() {
         let res = parse(
             r"
-            mov r0.xy, thread_id
-            and r0.x, r0.x, u(255)
-            div.u32 r0.y, r0.y, u(256)
-            mov r0.zw, r0.xy
-            utof r0.xy, r0.xy
-            ; add 0.5 to fit the center of the texel
-            add.f32 r0.xy, r0.xy, f2(0.5 0.5)
-            ; normalize coordinates
-            div.f32 r0.xy, r0.xy, f2(256.0 256.0)
-            ; tx * 2.0 - 1.0
-            mul.f32 r0.xy, r0.xy, f2(2.0 2.0)
-            sub.f32 r0.xy, r0.xy, f2(1.0 1.0)
-            ; rotate with pi/4
-            mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)
-            add.f32 r5.x, r4.x, r4.y
-            sub.f32 r5.y, r4.y, r4.x
-            ;mul.f32 r5.x, r5.x, f(2.0)
-            mov r0.xy, r5.xy
-            ; texture fetch
-            ; coordinates are normalized
-            ; type conversion and coordinate conversion happens here
-            sample r1.xyzw, t0.xyzw, s0, r0.xy
-            ; coordinates are u32 here(in texels)
-            ; type conversion needs to happen
-            st u0.xyzw, r0.zw, r1.xyzw
-            ret",
+jmp ENTRY
+
+; Distance function
+; In   : r32.xyz
+; Uses : r33.xyzw, r32.xyzw
+; Out  : r32.w
+DIST_FN:
+
+; Sphere_0
+sub.f32 r33.xyz, r32.xyz, f3(0.0 0.0 5.0)
+len r33.w, r33.xyz
+sub.f32 r33.w, r33.w, f(5.0)
+
+; Sphere_1
+sub.f32 r34.xyz, r32.xyz, f3(0.0 0.0 -5.0)
+len r34.w, r34.xyz
+sub.f32 r34.w, r34.w, f(5.0)
+
+; Smooth min
+sub.f32 r34.x, r33.w, r34.w
+mul.f32 r34.x, r34.x, f(0.2)
+mad.f32 r34.x, r34.x, f(0.5), f(0.5)
+clamp r34.x, r34.x
+; mul.f32 r34.x, r34.x, r34.x
+lerp r32.w, r34.w, r33.w, r34.x
+
+sub.f32 r34.w, r34.x, f(1.0)
+mul.f32 r34.w, r34.w, f(5.)
+mad.f32 r32.w, r34.x, r34.w, r32.w
+
+
+pop_mask
+
+ENTRY:
+; Figure out where we are in the screen space
+mov r0.xy, thread_id
+and r0.x, r0.x, u(255)
+div.u32 r0.y, r0.y, u(256)
+mov r0.zw, r0.xy
+
+; put the red color as an indiacation of ongoing work
+st u0.xyzw, r0.zw, f4(1.0 0.0 0.0 1.0)
+
+; Normalize screen coordiantes
+utof r0.xy, r0.xy
+; add 0.5 to fit the center of the texel
+add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+; normalize coordinates
+div.f32 r0.xy, r0.xy, f2(256.0 256.0)
+; tx * 2.0 - 1.0
+mul.f32 r0.xy, r0.xy, f2(2.0 -2.0)
+sub.f32 r0.xy, r0.xy, f2(1.0 -1.0)
+
+; Setup a simple pinhole camera
+; Camera position
+mov r1.xyz, f3(10.0 10.0 0.0)
+; Camera look vector
+mov r2.xyz, f3(-0.7071 -0.7071 0.0)
+; Camera right vector
+mov r3.xyz, f3(-0.7071 0.7071 0.0)
+; Camera up vector
+mov r4.xyz, f3(0.0 0.0 1.0)
+; Setup ray direction
+mov r5.xyz, r2.xyz
+mad.f32 r5.xyz, r0.xxx, r3.xyz, r5.xyz
+mad.f32 r5.xyz, r0.yyy, r4.xyz, r5.xyz
+norm r5.xyz, r5.xyz
+
+; Now solve the scene
+
+mov r15.xyz, r5.xyz
+mul.f32 r15.xyz, r15.xyz, f3(0.01 0.01 0.01)
+add.f32 r15.xyz, r15.xyz, r1.xyz
+
+;jmp LOOP_END
+
+push_mask LOOP_END
+LOOP_BEGIN:
+; if (r16.y < 16)
+lt.u32 r16.x, r16.y, u(16)
+mask_nz r16.x
+; Loop body begin
+mov r32.xyz, r15.xyz
+push_mask RET
+jmp DIST_FN
+RET:
+gt.f32 r14.x, r32.w, f(0.001)
+sub.u32 r13.x, u(1), r14.x
+utof r13.x, r13.x
+mask_nz r14.x
+mad.f32 r15.xyz, r5.xyz, r32.www, r15.xyz
+
+; Loop body end
+; Increment iteration counter
+add.u32 r16.y, r16.y, u(1)
+
+jmp LOOP_BEGIN
+
+LOOP_END:
+
+mov r10.w, f(1.0)
+abs.f32 r10.xyz, r5.www
+
+push_mask L1
+mask_nz r13.x
+norm r15.xyz, r15.xyz
+sample r10.xyzw, t0.xyzw, s0, r15.xy
+pop_mask
+L1:
+; mov r5.xyz, r32.www
+; mov r16.y, u(1)
+; utof r14.x, r16.y
+; div.f32 r14.x, r14.x, f(4.0)
+
+st u0.xyzw, r0.zw, r10.xyzw
+ret",
         );
         let config = GPUConfig {
             DRAM_latency: 1,
@@ -3209,12 +3496,12 @@ mod tests {
             L2_latency: 1,
             sampler_cache_size: 1 << 10,
             sampler_latency: 1,
-            VGPRF_per_pe: 8,
+            VGPRF_per_pe: 128,
             wave_size: 32,
-            CU_count: 12,
-            ALU_per_cu: 2,
-            waves_per_cu: 4,
-            fd_per_cu: 1,
+            CU_count: 16,
+            ALU_per_cu: 16,
+            waves_per_cu: 16,
+            fd_per_cu: 16,
             ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
@@ -3264,7 +3551,7 @@ mod tests {
                 sample_mode: SampleMode::BILINEAR,
             }],
             32,
-            (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
+            1//(TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
         while let Some(events) = clock(&mut gpu_state) {
             // println!("{:?}", gpu_state.l2.cache_table.miss_cnt);
@@ -3566,8 +3853,6 @@ mod tests {
         );
         let mut history: Vec<String> = Vec::new();
         while clock(&mut gpu_state).is_some() {
-            
-
             let line = format!(
                 // "\"{:?}:<{:?}|{:?}|{:?}>\",",
                 "{:?}:<{:?}|{:?}|{:?}>",
@@ -3615,8 +3900,6 @@ mod tests {
                 "8:<0|0|0>",
                 "8:<0|0|0>",
                 "9:<0|0|0>",
-
-
             ]
         );
     }
@@ -4325,7 +4608,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::MOV,
                     interp: Interpretation::NONE,
-                    line: 1,
+                    line: 2,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 1,
@@ -4342,7 +4625,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::MOV,
                     interp: Interpretation::NONE,
-                    line: 2,
+                    line: 3,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 2,
@@ -4369,7 +4652,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::ADD,
                     interp: Interpretation::F32,
-                    line: 3,
+                    line: 4,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 1,
@@ -4389,7 +4672,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::MOV,
                     interp: Interpretation::NONE,
-                    line: 4,
+                    line: 5,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
@@ -4403,19 +4686,19 @@ mod tests {
                 Instruction {
                     ty: InstTy::POP_MASK,
                     interp: Interpretation::NONE,
-                    line: 5,
+                    line: 6,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE,]
                 },
                 Instruction {
                     ty: InstTy::RET,
                     interp: Interpretation::NONE,
-                    line: 6,
+                    line: 7,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE,]
                 },
                 Instruction {
                     ty: InstTy::BR_PUSH,
                     interp: Interpretation::NONE,
-                    line: 8,
+                    line: 9,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 1,
@@ -4434,25 +4717,25 @@ mod tests {
                 Instruction {
                     ty: InstTy::POP_MASK,
                     interp: Interpretation::NONE,
-                    line: 10,
+                    line: 11,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
                 },
                 Instruction {
                     ty: InstTy::POP_MASK,
                     interp: Interpretation::NONE,
-                    line: 12,
+                    line: 13,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
                 },
                 Instruction {
                     ty: InstTy::RET,
                     interp: Interpretation::NONE,
-                    line: 13,
+                    line: 14,
                     ops: [Operand::NONE, Operand::NONE, Operand::NONE, Operand::NONE]
                 },
                 Instruction {
                     ty: InstTy::LT,
                     interp: Interpretation::F32,
-                    line: 14,
+                    line: 15,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 1,
@@ -4487,7 +4770,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::MOV,
                     interp: Interpretation::NONE,
-                    line: 15,
+                    line: 16,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
@@ -4506,7 +4789,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::MOV,
                     interp: Interpretation::NONE,
-                    line: 16,
+                    line: 17,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
@@ -4525,7 +4808,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::MOV,
                     interp: Interpretation::NONE,
-                    line: 17,
+                    line: 18,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,
@@ -4544,7 +4827,7 @@ mod tests {
                 Instruction {
                     ty: InstTy::UTOF,
                     interp: Interpretation::NONE,
-                    line: 18,
+                    line: 19,
                     ops: [
                         Operand::VRegister(RegRef {
                             id: 4,

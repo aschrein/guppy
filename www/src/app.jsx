@@ -68,32 +68,100 @@ class App extends React.Component {
     }
     render() {
         let def_value =
-            "\n\
+"\n\
+jmp ENTRY\n\
+\n\
+; Distance function\n\
+; In   : r32.xyz\n\
+; Uses : .\n\
+; Out  : r32.w\n\
+DIST_FN:\n\
+len r32.w, r32.xyz\n\
+sub.f32 r32.w, r32.w, f(10.0)\n\
+pop_mask\n\
+\n\
+ENTRY:\n\
+; Figure out where we are in the screen space\n\
 mov r0.xy, thread_id\n\
 and r0.x, r0.x, u(255)\n\
 div.u32 r0.y, r0.y, u(256)\n\
 mov r0.zw, r0.xy\n\
+\n\
+; put the red color as an indiacation of ongoing work\n\
+st u0.xyzw, r0.zw, f4(1.0 0.0 0.0 1.0)\n\
+\n\
+; Normalize screen coordiantes\n\
 utof r0.xy, r0.xy\n\
 ; add 0.5 to fit the center of the texel\n\
 add.f32 r0.xy, r0.xy, f2(0.5 0.5)\n\
 ; normalize coordinates\n\
 div.f32 r0.xy, r0.xy, f2(256.0 256.0)\n\
 ; tx * 2.0 - 1.0\n\
-mul.f32 r0.xy, r0.xy, f2(2.0 2.0)\n\
-sub.f32 r0.xy, r0.xy, f2(1.0 1.0)\n\
+mul.f32 r0.xy, r0.xy, f2(2.0 -2.0)\n\
+sub.f32 r0.xy, r0.xy, f2(1.0 -1.0)\n\
+\n\
+; Setup a simple pinhole camera\n\
+; Camera position\n\
+mov r1.xyz, f3(10.0 10.0 0.0)\n\
+; Camera look vector\n\
+mov r2.xyz, f3(-0.7071 -0.7071 0.0)\n\
+; Camera right vector\n\
+mov r3.xyz, f3(-0.7071 0.7071 0.0)\n\
+; Camera up vector\n\
+mov r4.xyz, f3(0.0 0.0 1.0)\n\
+; Setup ray direction\n\
+mov r5.xyz, r2.xyz\n\
+mad.f32 r5.xyz, r0.xxx, r3.xyz, r5.xyz\n\
+mad.f32 r5.xyz, r0.yyy, r4.xyz, r5.xyz\n\
+norm r5.xyz, r5.xyz\n\
+\n\
+; Now solve the scene\n\
+\n\
+mov r15.xyz, r5.xyz\n\
+mul.f32 r15.xyz, r15.xyz, f3(0.01 0.01 0.01)\n\
+add.f32 r15.xyz, r15.xyz, r1.xyz\n\
+\n\
+push_mask LOOP_END\n\
+LOOP_BEGIN:\n\
+; if (r16.y < 16)\n\
+lt.u32 r16.x, r16.y, u(16)\n\
+mask_nz r16.x\n\
+; Loop body begin\n\
+mov r32.xyz, r15.xyz\n\
+push_mask RET\n\
+jmp DIST_FN\n\
+RET:\n\
+lt.f32 r14.x, r32.w, f(0.0001)\n\
+mask_nz r14.x\n\
+mad.f32 r15.xyz, r5.xyz, r32.www, r15.xyz\n\
+\n\
+; Loop body end\n\
+; Increment iteration counter\n\
+add.u32 r16.y, r16.y, u(1)\n\
+; sample r10.xyzw, t0.xyzw, s0, r0.xy\n\
+jmp LOOP_BEGIN\n\
+\n\
+LOOP_END:\n\
+\n\
+\n\
+\n\
+mov r5.xyz, r32.www\n\
+mov r10.w, f(1.0)\n\
+abs.f32 r10.xyz, r5.xyz\n\
 ; rotate with pi/4\n\
-mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)\n\
-add.f32 r5.x, r4.x, r4.y\n\
-sub.f32 r5.y, r4.y, r4.x\n\
-;mul.f32 r5.x, r5.x, f(2.0)\n\
-mov r0.xy, r5.xy\n\
+; mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)\n\
+; add.f32 r5.x, r4.x, r4.y\n\
+; sub.f32 r5.y, r4.y, r4.x\n\
+; mul.f32 r5.x, r5.x, f(2.0)\n\
+; mov r0.xy, r5.xy\n\
+\n\
 ; texture fetch\n\
 ; coordinates are normalized\n\
 ; type conversion and coordinate conversion happens here\n\
-sample r1.xyzw, t0.xyzw, s0, r0.xy\n\
+\n\
 ; coordinates are u32 here(in texels)\n\
 ; type conversion needs to happen\n\
-st u0.xyzw, r0.zw, r1.xyzw\n\
+st u0.xyzw, r0.zw, r10.xyzw\n\
 ret";
 
         let def_value_0 =
@@ -549,12 +617,12 @@ class GoldenLayoutWrapper extends React.Component {
             "group_size": 32, "groups_count": 2048, "cycles_per_iter": 1
         };
         this.globals.gpuConfig = {
-            "DRAM_latency": 32,
-            "DRAM_bandwidth": 4 * 64, "L1_size": 1024, "L1_latency": 8,
+            "DRAM_latency": 4,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
-            "sampler_latency": 8, "VGPRF_per_pe": 8, "wave_size": 32,
-            "CU_count": 4, "ALU_per_cu": 1, "waves_per_cu": 4, "fd_per_cu": 1,
-            "ALU_pipe_len": 4
+            "sampler_latency": 4, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 4, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "ALU_pipe_len": 1
         };
         this.globals.wasm = null;
         this.globals.r_images = [];

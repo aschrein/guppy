@@ -1,4 +1,4 @@
-# Toy GPU emulator
+# Toy GPU performace simulator
 ## Build
 ```console
 git clone https://github.com/aschrein/guppy && cd guppy
