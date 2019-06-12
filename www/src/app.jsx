@@ -14,7 +14,7 @@ function onChange(newValue) {
 
 const _wasm = import("guppy_rust");
 
-class App extends React.Component {
+class TextEditorComponent extends React.Component {
 
     constructor(props, context) {
         super(props, context);
@@ -68,16 +68,37 @@ class App extends React.Component {
     }
     render() {
         let def_value =
-"\n\
-jmp ENTRY\n\
+"jmp ENTRY\n\
 \n\
 ; Distance function\n\
 ; In   : r32.xyz\n\
-; Uses : .\n\
+; Uses : r33.xyzw, r32.xyzw\n\
 ; Out  : r32.w\n\
 DIST_FN:\n\
-len r32.w, r32.xyz\n\
-sub.f32 r32.w, r32.w, f(10.0)\n\
+\n\
+; Sphere_0\n\
+sub.f32 r33.xyz, r32.xyz, f3(0.0 0.0 5.0)\n\
+len r33.w, r33.xyz\n\
+sub.f32 r33.w, r33.w, f(5.0)\n\
+\n\
+; Sphere_1\n\
+sub.f32 r34.xyz, r32.xyz, f3(0.0 0.0 -5.0)\n\
+len r34.w, r34.xyz\n\
+sub.f32 r34.w, r34.w, f(5.0)\n\
+\n\
+; Smooth min\n\
+sub.f32 r34.x, r33.w, r34.w\n\
+mul.f32 r34.x, r34.x, f(0.2)\n\
+mad.f32 r34.x, r34.x, f(0.5), f(0.5)\n\
+clamp r34.x, r34.x\n\
+; mul.f32 r34.x, r34.x, r34.x\n\
+lerp r32.w, r34.w, r33.w, r34.x\n\
+\n\
+sub.f32 r34.w, r34.x, f(1.0)\n\
+mul.f32 r34.w, r34.w, f(5.)\n\
+mad.f32 r32.w, r34.x, r34.w, r32.w\n\
+\n\
+\n\
 pop_mask\n\
 \n\
 ENTRY:\n\
@@ -121,6 +142,8 @@ mov r15.xyz, r5.xyz\n\
 mul.f32 r15.xyz, r15.xyz, f3(0.01 0.01 0.01)\n\
 add.f32 r15.xyz, r15.xyz, r1.xyz\n\
 \n\
+;jmp LOOP_END\n\
+\n\
 push_mask LOOP_END\n\
 LOOP_BEGIN:\n\
 ; if (r16.y < 16)\n\
@@ -131,36 +154,34 @@ mov r32.xyz, r15.xyz\n\
 push_mask RET\n\
 jmp DIST_FN\n\
 RET:\n\
-lt.f32 r14.x, r32.w, f(0.0001)\n\
+gt.f32 r14.x, r32.w, f(0.001)\n\
+sub.u32 r13.x, u(1), r14.x\n\
+utof r13.x, r13.x\n\
 mask_nz r14.x\n\
 mad.f32 r15.xyz, r5.xyz, r32.www, r15.xyz\n\
 \n\
 ; Loop body end\n\
 ; Increment iteration counter\n\
 add.u32 r16.y, r16.y, u(1)\n\
-; sample r10.xyzw, t0.xyzw, s0, r0.xy\n\
+\n\
 jmp LOOP_BEGIN\n\
 \n\
 LOOP_END:\n\
 \n\
-\n\
-\n\
-mov r5.xyz, r32.www\n\
 mov r10.w, f(1.0)\n\
-abs.f32 r10.xyz, r5.xyz\n\
-; rotate with pi/4\n\
-; mul.f32 r4.xy, r0.xy, f2(0.7071 0.7071)\n\
-; add.f32 r5.x, r4.x, r4.y\n\
-; sub.f32 r5.y, r4.y, r4.x\n\
-; mul.f32 r5.x, r5.x, f(2.0)\n\
-; mov r0.xy, r5.xy\n\
+abs.f32 r10.xyz, r5.www\n\
 \n\
-; texture fetch\n\
-; coordinates are normalized\n\
-; type conversion and coordinate conversion happens here\n\
+push_mask L1\n\
+mask_nz r13.x\n\
+norm r15.xyz, r15.xyz\n\
+sample r10.xyzw, t0.xyzw, s0, r15.xy\n\
+pop_mask\n\
+L1:\n\
+; mov r5.xyz, r32.www\n\
+; mov r16.y, u(1)\n\
+; utof r14.x, r16.y\n\
+; div.f32 r14.x, r14.x, f(4.0)\n\
 \n\
-; coordinates are u32 here(in texels)\n\
-; type conversion needs to happen\n\
 st u0.xyzw, r0.zw, r10.xyzw\n\
 ret";
 
@@ -241,7 +262,7 @@ LB_2:\n\
     }
 }
 
-class Parameters extends React.Component {
+class ParametersComponent extends React.Component {
 
     constructor(props, context) {
         super(props, context);
@@ -289,7 +310,7 @@ class Parameters extends React.Component {
     }
 }
 
-class Memory extends React.Component {
+class MemoryComponent extends React.Component {
 
     constructor(props, context) {
         super(props, context);
@@ -383,6 +404,11 @@ class CanvasComponent extends React.Component {
     updateCanvas() {
         if (!this.draw) {
             return;
+        }
+        if (this.globals().active_mask_history) {
+            this.neededWidth = this.globals().active_mask_history.length + 512;
+            this.neededHeight = (this.globals().gpuConfig["wave_size"] + 1) *
+            this.globals().gpuConfig["CU_count"] * this.globals().gpuConfig["waves_per_cu"] + 3*512;
         }
         this.draw = false;
         this.canvas.width = this.neededWidth;
@@ -617,12 +643,12 @@ class GoldenLayoutWrapper extends React.Component {
             "group_size": 32, "groups_count": 2048, "cycles_per_iter": 1
         };
         this.globals.gpuConfig = {
-            "DRAM_latency": 4,
+            "DRAM_latency": 32,
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
-            "sampler_latency": 4, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 4, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
-            "ALU_pipe_len": 1
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 16, "ALU_per_cu": 1, "waves_per_cu": 4, "fd_per_cu": 1,
+            "ALU_pipe_len": 4
         };
         this.globals.wasm = null;
         this.globals.r_images = [];
@@ -701,13 +727,13 @@ class GoldenLayoutWrapper extends React.Component {
         layout.registerComponent('Canvas', CanvasComponent
         );
         layout.registerComponent('TextEditor',
-            App
+            TextEditorComponent
         );
         layout.registerComponent('Parameters',
-            Parameters
+            ParametersComponent
         );
         layout.registerComponent('Memory',
-            Memory
+            MemoryComponent
         );
         layout.init();
         window.React = React;
