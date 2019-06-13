@@ -1,12 +1,15 @@
 import GoldenLayout from 'golden-layout';
 import React from 'react';
 import ReactDOM from 'react-dom';
+import Markdown from 'react-markdown';
 import './css/main.css';
 import AceEditor from 'react-ace';
 import 'brace/mode/assembly_x86';
 // Import a Theme (okadia, github, xcode etc)
 import 'brace/theme/tomorrow_night_eighties';
 import { JSONEditor } from 'react-json-editor-viewer';
+import raymarcher_s from './asm/raymarcher.s';
+import readme_md from './Readme.md';
 
 function onChange(newValue) {
     console.log('change', newValue);
@@ -67,172 +70,7 @@ class TextEditorComponent extends React.Component {
         }
     }
     render() {
-        let def_value =
-"jmp ENTRY\n\
-\n\
-; Distance function\n\
-; In   : r32.xyz\n\
-; Uses : r33.xyzw, r32.xyzw\n\
-; Out  : r32.w\n\
-DIST_FN:\n\
-\n\
-; Sphere_0\n\
-sub.f32 r33.xyz, r32.xyz, f3(0.0 0.0 5.0)\n\
-len r33.w, r33.xyz\n\
-sub.f32 r33.w, r33.w, f(5.0)\n\
-\n\
-; Sphere_1\n\
-sub.f32 r34.xyz, r32.xyz, f3(0.0 0.0 -5.0)\n\
-len r34.w, r34.xyz\n\
-sub.f32 r34.w, r34.w, f(5.0)\n\
-\n\
-; Smooth min\n\
-sub.f32 r34.x, r33.w, r34.w\n\
-mul.f32 r34.x, r34.x, f(0.2)\n\
-mad.f32 r34.x, r34.x, f(0.5), f(0.5)\n\
-clamp r34.x, r34.x\n\
-; mul.f32 r34.x, r34.x, r34.x\n\
-lerp r32.w, r34.w, r33.w, r34.x\n\
-\n\
-sub.f32 r34.w, r34.x, f(1.0)\n\
-mul.f32 r34.w, r34.w, f(5.)\n\
-mad.f32 r32.w, r34.x, r34.w, r32.w\n\
-\n\
-\n\
-pop_mask\n\
-\n\
-ENTRY:\n\
-; Figure out where we are in the screen space\n\
-mov r0.xy, thread_id\n\
-and r0.x, r0.x, u(255)\n\
-div.u32 r0.y, r0.y, u(256)\n\
-mov r0.zw, r0.xy\n\
-\n\
-; put the red color as an indiacation of ongoing work\n\
-st u0.xyzw, r0.zw, f4(1.0 0.0 0.0 1.0)\n\
-\n\
-; Normalize screen coordiantes\n\
-utof r0.xy, r0.xy\n\
-; add 0.5 to fit the center of the texel\n\
-add.f32 r0.xy, r0.xy, f2(0.5 0.5)\n\
-; normalize coordinates\n\
-div.f32 r0.xy, r0.xy, f2(256.0 256.0)\n\
-; tx * 2.0 - 1.0\n\
-mul.f32 r0.xy, r0.xy, f2(2.0 -2.0)\n\
-sub.f32 r0.xy, r0.xy, f2(1.0 -1.0)\n\
-\n\
-; Setup a simple pinhole camera\n\
-; Camera position\n\
-mov r1.xyz, f3(10.0 10.0 0.0)\n\
-; Camera look vector\n\
-mov r2.xyz, f3(-0.7071 -0.7071 0.0)\n\
-; Camera right vector\n\
-mov r3.xyz, f3(-0.7071 0.7071 0.0)\n\
-; Camera up vector\n\
-mov r4.xyz, f3(0.0 0.0 1.0)\n\
-; Setup ray direction\n\
-mov r5.xyz, r2.xyz\n\
-mad.f32 r5.xyz, r0.xxx, r3.xyz, r5.xyz\n\
-mad.f32 r5.xyz, r0.yyy, r4.xyz, r5.xyz\n\
-norm r5.xyz, r5.xyz\n\
-\n\
-; Now solve the scene\n\
-\n\
-mov r15.xyz, r5.xyz\n\
-mul.f32 r15.xyz, r15.xyz, f3(0.01 0.01 0.01)\n\
-add.f32 r15.xyz, r15.xyz, r1.xyz\n\
-\n\
-;jmp LOOP_END\n\
-\n\
-push_mask LOOP_END\n\
-LOOP_BEGIN:\n\
-; if (r16.y < 16)\n\
-lt.u32 r16.x, r16.y, u(16)\n\
-mask_nz r16.x\n\
-; Loop body begin\n\
-mov r32.xyz, r15.xyz\n\
-push_mask RET\n\
-jmp DIST_FN\n\
-RET:\n\
-gt.f32 r14.x, r32.w, f(0.001)\n\
-sub.u32 r13.x, u(1), r14.x\n\
-utof r13.x, r13.x\n\
-mask_nz r14.x\n\
-mad.f32 r15.xyz, r5.xyz, r32.www, r15.xyz\n\
-\n\
-; Loop body end\n\
-; Increment iteration counter\n\
-add.u32 r16.y, r16.y, u(1)\n\
-\n\
-jmp LOOP_BEGIN\n\
-\n\
-LOOP_END:\n\
-\n\
-mov r10.w, f(1.0)\n\
-abs.f32 r10.xyz, r5.www\n\
-\n\
-push_mask L1\n\
-mask_nz r13.x\n\
-norm r15.xyz, r15.xyz\n\
-sample r10.xyzw, t0.xyzw, s0, r15.xy\n\
-pop_mask\n\
-L1:\n\
-; mov r5.xyz, r32.www\n\
-; mov r16.y, u(1)\n\
-; utof r14.x, r16.y\n\
-; div.f32 r14.x, r14.x, f(4.0)\n\
-\n\
-st u0.xyzw, r0.zw, r10.xyzw\n\
-ret";
-
-        let def_value_0 =
-            "\
-mov r0.xy, thread_id\n\
-and r0.x, r0.x, u(63)\n\
-div.u32 r0.y, r0.y, u(64)\n\
-mov r0.zw, r0.xy\n\
-mov r1.xyzw, f4(1.0 0.0 0.0 1.0)\n\
-st u0.xyzw, r0.zw, r1.xyzw\n\
-ret\n\
-        ";
-        let def_value_1 =
-            "\
-    mov r4.w, lane_id\n\
-    utof r4.xyzw, r4.wwww\n\
-    mov r4.z, wave_id\n\
-    utof r4.z, r4.z\n\
-    add.f32 r4.xyzw, r4.xyzw, f4(0.0 0.0 0.0 1.0)\n\
-    lt.f32 r4.xy, r4.ww, f2(16.0 8.0)\n\
-    utof r4.xy, r4.xy\n\
-    br_push r4.x, LB_1, LB_2\n\
-    mov r0.x, f(666.0)\n\
-    br_push r4.y, LB_0_1, LB_0_2\n\
-    mov r0.y, f(666.0)\n\
-    pop_mask\n\
-LB_0_1:\n\
-    mov r0.y, f(777.0)\n\
-    pop_mask\n\
-LB_0_2:\n\
-    pop_mask\n\
-LB_1:\n\
-    mov r0.x, f(777.0)\n\
-    ; push the current wave mask\n\
-    push_mask LOOP_END\n\
-LOOP_PROLOG:\n\
-    lt.f32 r4.x, r4.w, f(24.0)\n\
-    add.f32 r4.w, r4.w, f(1.0)\n\
-    ; Setting current lane mask\n\
-    ; If all lanes are disabled pop_mask is invoked\n\
-    ; If mask stack is empty then wave is retired\n\
-    mask_nz r4.x\n\
-LOOP_BEGIN:\n\
-    jmp LOOP_PROLOG\n\
-LOOP_END:\n\
-    pop_mask\n\
-LB_2:\n\
-    mov r4.y, lane_id\n\
-    utof r4.y, r4.y\n\
-    ret";
+        let def_value = raymarcher_s;
         this.text = def_value;
         return (
             <div className="ace_editor_container">
@@ -305,7 +143,25 @@ class ParametersComponent extends React.Component {
                     }
                     onChange={this.onChangeDispatch}
                 />
+
             </div>
+        );
+    }
+}
+
+class ReadmeComponent extends React.Component {
+
+    constructor(props, context) {
+        super(props, context);
+    }
+
+    componentDidMount() {
+    }
+
+    render() {
+
+        return (
+            <Markdown className="Markdown" source={readme_md} />
         );
     }
 }
@@ -408,7 +264,7 @@ class CanvasComponent extends React.Component {
         if (this.globals().active_mask_history) {
             this.neededWidth = this.globals().active_mask_history.length + 512;
             this.neededHeight = (this.globals().gpuConfig["wave_size"] + 1) *
-            this.globals().gpuConfig["CU_count"] * this.globals().gpuConfig["waves_per_cu"] + 3*512;
+                this.globals().gpuConfig["CU_count"] * this.globals().gpuConfig["waves_per_cu"] + 3 * 512;
         }
         this.draw = false;
         this.canvas.width = this.neededWidth;
@@ -693,13 +549,26 @@ class GoldenLayoutWrapper extends React.Component {
 
                         ]
                     }
-                    , {
-                        type: 'react-component',
-                        component: 'Canvas',
-                        title: 'Canvas',
-                        props: { globals: () => this.globals }
+                    ,
+                    {
+                        type: 'stack',
+                        content: [
+                            {
+                                type: 'react-component',
+                                component: 'Canvas',
+                                title: 'Canvas',
+                                props: { globals: () => this.globals }
 
-                    },
+                            },
+                            {
+                                type: 'react-component',
+                                component: 'Readme',
+                                title: 'Readme',
+                                props: { globals: () => this.globals }
+
+                            },
+                        ]
+                    }
                 ]
             }]
         };
@@ -734,6 +603,9 @@ class GoldenLayoutWrapper extends React.Component {
         );
         layout.registerComponent('Memory',
             MemoryComponent
+        );
+        layout.registerComponent('Readme',
+            ReadmeComponent
         );
         layout.init();
         window.React = React;

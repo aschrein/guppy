@@ -1,11 +1,9 @@
 {
-  "name": "create-wasm-app",
+  "name": "GUPPY",
   "version": "0.1.0",
-  "description": "create an app to consume rust-generated wasm packages",
+  "description": "",
   "main": "index.js",
-  "bin": {
-    "create-wasm-app": ".bin/create-wasm-app.js"
-  },
+  "homepage": "http://aschrein.github.io/guppy/",
   "scripts": {
     "start": "react-app-rewired start",
     "build": "react-app-rewired build",
@@ -24,11 +22,13 @@
     "guppy_rust": "file:../pkg",
     "immutable": "^3.8.1",
     "prop-types": "^15.5.10",
+    "raw-loader": "^3.0.0",
     "react": "^15.5.4",
     "react-ace": "^6.5.0",
     "react-app-rewired": "^2.1.0",
     "react-dom": "^15.5.4",
     "react-json-editor-viewer": "^1.0.5",
+    "react-markdown": "^4.0.8",
     "react-redux": "^5.0.5",
     "react-router-dom": "^5.0.1",
     "react-scripts": "2.1.5",
