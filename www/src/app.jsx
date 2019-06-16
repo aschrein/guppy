@@ -29,7 +29,8 @@ class TextEditorComponent extends React.Component {
         this.PauseResume = this.PauseResume.bind(this);
         this.onResize = this.onResize.bind(this);
         this.setText = this.setText.bind(this);
-
+        this.setClocks = this.setClocks.bind(this);
+        this.state = {clocks: 0};
 
     }
 
@@ -39,6 +40,7 @@ class TextEditorComponent extends React.Component {
         // );
         this.props.glContainer.on('resize', this.onResize);
         this.props.globals().setText = this.setText;
+        this.props.globals().setClocks = this.setClocks;
     }
 
     onChange(newValue) {
@@ -54,7 +56,9 @@ class TextEditorComponent extends React.Component {
             this.props.globals().run = !this.props.globals().run;
         }
     }
-
+    setClocks(clocks) {
+        this.setState({clocks: clocks});
+    }
     setText(text) {
         this.refs.editor.editor.setValue(text);
     }
@@ -86,7 +90,7 @@ class TextEditorComponent extends React.Component {
                     Execute
                 </button>
                 <button style={{ margin: 10 }} onClick={this.PauseResume}>
-                    Pause/Resume
+                    Pause/Resume Clocks:{this.state.clocks}
                 </button>
                 <div style={{ background: "#cccccc", margin: 10 }}>
                     <p style={{ margin: 5 }}>Setup example</p>
@@ -410,6 +414,10 @@ class GraphsComponent extends React.Component {
             4: "red"
         };
         {
+            //8:  4021
+            //32: 4226
+            //64: 4524
+            
             var canvas = this.ctx;
             for (var i = 0; i < 5; i++) {
                 this.ctx.fillStyle = color_code[i];
@@ -425,7 +433,7 @@ class GraphsComponent extends React.Component {
         if (this.globals().active_mask_history) {
             let history = this.globals().active_mask_history;
             if (history.length > 0) {
-
+                putTag("Clocks:" + this.globals().clocks, 0, y);
                 var canvas = this.ctx;
                 // console.log('updateCanvas', history[0].length);
                 x = 48;
@@ -621,12 +629,14 @@ class GraphsComponent extends React.Component {
     }
     render() {
         return <div>
-            <button style={{ "marginLeft": 32 }} onClick={this.scheduleDraw}>
+            <div style={{ "marginLeft": 0, "marginRight": "40%" }}>
+            <button  onClick={this.scheduleDraw}>
                 Render History
             </button>
-            <button  style={{ "marginLeft": 0, "marginRight": "10%" }} onClick={this.remapColors}>
+            <button   onClick={this.remapColors}>
                 Shuffle Colors
             </button>
+            </div>
             <canvas ref="canvas" /> </div>;
     }
 }
@@ -662,7 +672,7 @@ class GoldenLayoutWrapper extends React.Component {
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
             "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "CU_count": 2, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
             "ALU_pipe_len": 1
         };
         this.globals.setText(branch_1_s);
@@ -678,7 +688,7 @@ class GoldenLayoutWrapper extends React.Component {
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
             "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "CU_count": 2, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
             "ALU_pipe_len": 1
         };
         this.globals.setText(branch_2_s);
@@ -691,6 +701,8 @@ class GoldenLayoutWrapper extends React.Component {
                 if (!this.globals.wasm.guppy_clock()) {
                     this.globals.run = false;
                 } else {
+                    this.globals.clocks += 1;
+                    this.globals.setClocks(this.globals.clocks);
                     this.globals.active_mask_history.push(this.globals.wasm.guppy_get_active_mask());
                     this.globals.alu_active_history.push(this.globals.wasm.guppy_get_valu_active());
                     this.globals.samplers_metric_history.push([
@@ -725,6 +737,7 @@ class GoldenLayoutWrapper extends React.Component {
             "ALU_pipe_len": 1
         };
         this.globals.wasm = null;
+        this.globals.clocks = 0;
         this.globals.setupBranch_1 = this.setupBranch_1;
         this.globals.setupBranch_2 = this.setupBranch_2;
         this.globals.setupRaymarching = this.setupRaymarching;
@@ -806,10 +819,13 @@ class GoldenLayoutWrapper extends React.Component {
             globals.alu_active_history = [];
             globals.samplers_metric_history = [];
             globals.l2_metric_history = [];
+            globals.clocks = 0;
             if (globals.updateMemory)
                 globals.updateMemory();
             if (globals.updateParameters)
                 globals.updateParameters();
+            if (globals.updateCanvas)
+                globals.updateCanvas();
         }
         _wasm.then(wasm => {
             layout.updateSize();

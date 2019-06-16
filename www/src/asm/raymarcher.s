@@ -9,7 +9,7 @@ DIST_FN:
 ; Sphere_0
 sub.f32 r33.xyz, r32.xyz, f3(0.0 0.0 5.0)
 len r33.w, r33.xyz
-sub.f32 r33.w, r33.w, f(7.0)
+sub.f32 r33.w, r33.w, f(9.0)
 
 ; Sphere_1
 sub.f32 r34.xyz, r32.xyz, f3(0.0 0.0 -5.0)
