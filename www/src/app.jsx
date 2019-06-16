@@ -28,6 +28,9 @@ class TextEditorComponent extends React.Component {
         this.Execute = this.Execute.bind(this);
         this.PauseResume = this.PauseResume.bind(this);
         this.onResize = this.onResize.bind(this);
+        this.setText = this.setText.bind(this);
+
+
     }
 
     componentDidMount() {
@@ -35,6 +38,7 @@ class TextEditorComponent extends React.Component {
         //     "ret"
         // );
         this.props.glContainer.on('resize', this.onResize);
+        this.props.globals().setText = this.setText;
     }
 
     onChange(newValue) {
@@ -49,6 +53,10 @@ class TextEditorComponent extends React.Component {
         if (this.props.globals().wasm) {
             this.props.globals().run = !this.props.globals().run;
         }
+    }
+
+    setText(text) {
+        this.refs.editor.editor.setValue(text);
     }
 
     Execute() {
@@ -71,8 +79,7 @@ class TextEditorComponent extends React.Component {
         }
     }
     render() {
-        let def_value = branch_2_s;
-        this.text = def_value;
+
         return (
             <div className="ace_editor_container">
                 <button style={{ margin: 10 }} onClick={this.Execute}>
@@ -81,8 +88,20 @@ class TextEditorComponent extends React.Component {
                 <button style={{ margin: 10 }} onClick={this.PauseResume}>
                     Pause/Resume
                 </button>
+                <div style={{ background: "#cccccc", margin: 10 }}>
+                    <p style={{ margin: 5 }}>Setup example</p>
+                    <button style={{ border: 1 }} onClick={this.props.globals().setupRaymarching}>
+                        RayMarching
+                    </button>
+                    <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_1}>
+                        branch_1
+                    </button>
+                    <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_2}>
+                        branch_2
+                    </button>
+                </div>
                 <AceEditor
-                    value={def_value}
+                    value={""}
                     ref="editor"
                     mode="assembly_x86"
                     theme="tomorrow_night_eighties"
@@ -108,9 +127,11 @@ class ParametersComponent extends React.Component {
 
         this.onChange = this.onChange.bind(this);
         this.onChangeDispatch = this.onChangeDispatch.bind(this);
+        this.updateParameters = this.updateParameters.bind(this);
     }
 
     componentDidMount() {
+        this.props.globals().updateParameters = this.updateParameters;
     }
 
     onChange(key, value, parent, data) {
@@ -126,12 +147,22 @@ class ParametersComponent extends React.Component {
 
     }
 
-    render() {
+    updateParameters() {
+        // console.log(this.refs.gpu_config.state);
+        this.refs.gpu_config.setState({ data: { root: this.props.globals().gpuConfig } });
+        this.refs.dispatch_config.setState({ data: { root: this.props.globals().dispatchConfig } });
+        // this.forceUpdate();
+        // this.refs.gpu_config.setData(this.props.globals().gpuConfig);
+        // this.refs.dispatch_config.setData(this.props.globals().dispatchConfig);
+    }
 
+    render() {
+        // console.log(this.props.globals().gpuConfig);
         return (
             <div>
                 <p style={{ color: "white", margin: 10 }}>GPU Config</p>
                 <JSONEditor
+                    ref="gpu_config"
                     data={
                         this.props.globals().gpuConfig
                     }
@@ -139,6 +170,7 @@ class ParametersComponent extends React.Component {
                 />
                 <p style={{ color: "white", margin: 10 }}>Dispatch config</p>
                 <JSONEditor
+                    ref="dispatch_config"
                     data={
                         this.props.globals().dispatchConfig
                     }
@@ -285,7 +317,16 @@ class GraphsComponent extends React.Component {
         this.updateCanvas = this.updateCanvas.bind(this);
         this.onResize = this.onResize.bind(this);
         this.scheduleDraw = this.scheduleDraw.bind(this);
+        this.remapColors = this.remapColors.bind(this);
         this.colorMap = {};
+        this.getRandomColor = () => {
+            var letters = '0123456789ABCDEF';
+            var color = '#';
+            for (var i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        };
     }
 
     componentDidMount() {
@@ -313,18 +354,22 @@ class GraphsComponent extends React.Component {
         this.updateCanvas();
     }
 
+    remapColors() {
+        
+        let waves_per_cu = this.globals().gpuConfig["waves_per_cu"];
+        for (var wave_id = 0; wave_id < waves_per_cu; wave_id++) {
+
+            this.colorMap[wave_id] = this.getRandomColor();
+        }
+        this.draw = true;
+        this.updateCanvas();
+    }
+
     updateCanvas() {
         if (!this.draw) {
             return;
         }
-        let getRandomColor = () => {
-            var letters = '0123456789ABCDEF';
-            var color = '#';
-            for (var i = 0; i < 6; i++) {
-                color += letters[Math.floor(Math.random() * 16)];
-            }
-            return color;
-        };
+
         let wave_size = this.globals().gpuConfig["wave_size"];
         let waves_per_cu = this.globals().gpuConfig["waves_per_cu"];
         let cu_count = this.globals().gpuConfig["CU_count"];
@@ -396,9 +441,8 @@ class GraphsComponent extends React.Component {
                         for (var wave_id = 0; wave_id < waves_per_cu; wave_id++) {
                             if (i == 0) {
                                 putTag("wave#" + wave_id, 0, y + wave_size / 2);
-                                if (!(wave_id in this.colorMap)) {
-                                    this.colorMap[wave_id] = getRandomColor();
-                                }
+                                if (!(wave_id in this.colorMap))
+                                    this.colorMap[wave_id] = this.getRandomColor();
                                 this.ctx.fillStyle = this.colorMap[wave_id];
                                 this.ctx.fillRect(38, y + wave_size / 2, 4, 4);
                             }
@@ -577,13 +621,70 @@ class GraphsComponent extends React.Component {
     }
     render() {
         return <div>
-            <button style={{ "margin-left": 32, "margin-right": "50%" }} onClick={this.scheduleDraw}>
+            <button style={{ "marginLeft": 32 }} onClick={this.scheduleDraw}>
                 Render History
+            </button>
+            <button  style={{ "marginLeft": 0, "marginRight": "10%" }} onClick={this.remapColors}>
+                Shuffle Colors
             </button>
             <canvas ref="canvas" /> </div>;
     }
 }
 class GoldenLayoutWrapper extends React.Component {
+    constructor(props, context) {
+        super(props, context);
+        this.setupRaymarching = this.setupRaymarching.bind(this);
+        this.setupBranch_1 = this.setupBranch_1.bind(this);
+        this.setupBranch_2 = this.setupBranch_2.bind(this);
+    }
+    setupRaymarching() {
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 2048, "cycles_per_iter": 1, "update graph": false
+        };
+        this.globals.gpuConfig = {
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 64, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "ALU_pipe_len": 1
+        };
+        this.globals.setText(raymarcher_s);
+        this.globals.resetGPU();
+    }
+
+    setupBranch_1() {
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 6, "cycles_per_iter": 1, "update graph": true
+        };
+        this.globals.gpuConfig = {
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "ALU_pipe_len": 1
+        };
+        this.globals.setText(branch_1_s);
+        this.globals.resetGPU();
+    }
+
+    setupBranch_2() {
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 6, "cycles_per_iter": 1, "update graph": true
+        };
+        this.globals.gpuConfig = {
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 2, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "ALU_pipe_len": 1
+        };
+        this.globals.setText(branch_2_s);
+        this.globals.resetGPU();
+    }
+
     timer() {
         if (this.globals.wasm && this.globals.run) {
             for (var i = 0; i < this.globals.dispatchConfig["cycles_per_iter"]; i++) {
@@ -613,17 +714,20 @@ class GoldenLayoutWrapper extends React.Component {
     componentDidMount() {
         this.globals = {};
         this.globals.dispatchConfig = {
-            "group_size": 32, "groups_count": 7, "cycles_per_iter": 1, "update graph": true
+            "group_size": 1, "groups_count": 1, "cycles_per_iter": 1, "update graph": true
         };
         this.globals.gpuConfig = {
-            "DRAM_latency": 32,
-            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
-            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
-            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 2, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
+            "DRAM_latency": 1,
+            "DRAM_bandwidth": 1, "L1_size": 0, "L1_latency": 0,
+            "L2_size": 1, "L2_latency": 1, "sampler_cache_size": 1,
+            "sampler_latency": 1, "VGPRF_per_pe": 1, "wave_size": 1,
+            "CU_count": 1, "ALU_per_cu": 1, "waves_per_cu": 1, "fd_per_cu": 1,
             "ALU_pipe_len": 1
         };
         this.globals.wasm = null;
+        this.globals.setupBranch_1 = this.setupBranch_1;
+        this.globals.setupBranch_2 = this.setupBranch_2;
+        this.globals.setupRaymarching = this.setupRaymarching;
         this.globals.r_images = [];
         this.globals.active_mask_history = null;
         this.globals.samplers_metric_history = null;
@@ -702,13 +806,16 @@ class GoldenLayoutWrapper extends React.Component {
             globals.alu_active_history = [];
             globals.samplers_metric_history = [];
             globals.l2_metric_history = [];
+            if (globals.updateMemory)
+                globals.updateMemory();
+            if (globals.updateParameters)
+                globals.updateParameters();
         }
         _wasm.then(wasm => {
             layout.updateSize();
             this.globals.wasm = wasm;
-            this.globals.resetGPU();
-            if (this.globals.updateMemory)
-                this.globals.updateMemory();
+            this.setupBranch_1();
+
             //console.log("wasm loaded");
             //console.log(wasm.guppy_get_config());
 
