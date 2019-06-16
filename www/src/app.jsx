@@ -57,7 +57,6 @@ class TextEditorComponent extends React.Component {
             for (var i = 0; i < globals.r_images.length; i++) {
                 globals.wasm.guppy_put_image(globals.r_images[i]);
             }
-            globals.wasm.guppy_init_framebuffer(256, 256);
             this.props.globals().wasm.guppy_dispatch(
                 this.text,
                 config["group_size"],
@@ -166,7 +165,7 @@ class ReadmeComponent extends React.Component {
     }
 }
 
-class MemoryComponent extends React.Component {
+class BindingsComponent extends React.Component {
 
     constructor(props, context) {
         super(props, context);
@@ -177,22 +176,40 @@ class MemoryComponent extends React.Component {
     componentDidMount() {
         this.props.globals().updateMemory = this.updateMemory;
         this.ctx = this.refs.canvas.getContext('2d');
-        let img = this.refs.img;
-        img.onload = () => {
-            this.refs.canvas.width = img.width;
-            this.refs.canvas.height = img.height;
-            this.ctx.drawImage(img, 0, 0);
-            var p = this.ctx.getImageData(0, 0, 1, 1).data;
-            function rgbToHex(r, g, b) {
-                if (r > 255 || g > 255 || b > 255)
-                    throw "Invalid color component";
-                return ((r << 16) | (g << 8) | b).toString(16);
+        let promiseOnload = (img) => {
+            return new Promise(resolve => {
+
+                img.onload = () => {
+                    // console.log("images Promise");
+                    resolve({ img, status: 'ok' });
+                };
+                img.onerror = () => resolve({ img, status: 'error' });
+            });
+        }
+        let t0 = this.refs.t0;
+        let t1 = this.refs.t1;
+        Promise.all([promiseOnload(t0), promiseOnload(t1)]).then((value) => {
+            // console.log("images loaded");
+            let pushImg = (img) => {
+                this.refs.canvas.width = img.width;
+                this.refs.canvas.height = img.height;
+                this.ctx.drawImage(img, 0, 0);
+                var p = this.ctx.getImageData(0, 0, 1, 1).data;
+                function rgbToHex(r, g, b) {
+                    if (r > 255 || g > 255 || b > 255)
+                        throw "Invalid color component";
+                    return ((r << 16) | (g << 8) | b).toString(16);
+                }
+                var hex = "#" + ("000000" + rgbToHex(p[0], p[1], p[2])).slice(-6);
+                let base64 = this.refs.canvas.toDataURL('image/png');
+                this.props.globals().r_images.push(base64);
             }
-            var hex = "#" + ("000000" + rgbToHex(p[0], p[1], p[2])).slice(-6);
-            let base64 = this.refs.canvas.toDataURL('image/png');
-            this.props.globals().r_images.push(base64);
+            pushImg(t0);
+            pushImg(t1);
+            this.props.globals().resetGPU();
+            this.updateMemory();
             // console.log(base64);
-        };
+        });
 
     }
 
@@ -200,11 +217,45 @@ class MemoryComponent extends React.Component {
         let ctx = this.refs.canvas.getContext('2d');
         let image = new Image();
         let canvas = this.refs.canvas;
+
         let globals = this.props.globals();
+
+        let t0 = this.refs.t0;
+        let t1 = this.refs.t1;
         image.onload = function () {
-            canvas.width = image.width;
-            canvas.height = image.height;
-            ctx.drawImage(image, 0, 0);
+            canvas.width = 512;
+            canvas.height = 1024;
+            // canvas.width = image.width;
+            // canvas.height += image.height;
+            ctx.fillStyle = "#222222";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            var x = 0;
+            var y = 5;
+            let drawText = (text) => {
+
+                ctx.font = "14px Monaco, monospace";
+                ctx.textAlign = "start";
+                ctx.textBaseline = "top";
+                ctx.fillStyle = "#ffffff";
+                ctx.fillText(text, x, y);
+                // y += 16;
+                x += text.length * 8;
+            };
+            drawText("s0 = Sampler {WrapMode::WRAP, SampleMode::BILINEAR}");
+            y += 16;
+            x = 0;
+            drawText("t0 = ");
+            ctx.drawImage(t0, x, y);
+            y += t0.height + 10;
+            x = 0;
+
+            drawText("t1 = ");
+            ctx.drawImage(t1, x, y);
+            y += t1.height + 10;
+            x = 0;
+            drawText("u0 = ");
+            ctx.drawImage(image, x, y);
         };
         let base64 = "data:image/png;base64," + globals.wasm.guppy_get_image(0, false);
         // console.log(base64);
@@ -216,13 +267,14 @@ class MemoryComponent extends React.Component {
         return (
             <div>
                 <canvas ref="canvas" />
-                <img style={{ display: "none" }} ref="img" src="img/lenna.png"></img>
+                <img style={{ display: "none" }} ref="t0" src="img/lenna.png"></img>
+                <img style={{ display: "none" }} ref="t1" src="img/rhino.png"></img>
             </div>
         );
     }
 }
 
-class CanvasComponent extends React.Component {
+class GraphsComponent extends React.Component {
 
     constructor(props, context) {
         super(props, context);
@@ -261,9 +313,14 @@ class CanvasComponent extends React.Component {
         if (!this.draw) {
             return;
         }
+        let wave_size = this.globals().gpuConfig["wave_size"];
+        let waves_per_cu = this.globals().gpuConfig["waves_per_cu"];
+        let cu_count = this.globals().gpuConfig["CU_count"];
+        let valu_count = this.globals().gpuConfig["ALU_per_cu"];
+        let valu_pipe_len = this.globals().gpuConfig["ALU_pipe_len"];
         if (this.globals().active_mask_history) {
             this.neededWidth = this.globals().active_mask_history.length + 512;
-            this.neededHeight = (this.globals().gpuConfig["wave_size"] + 1) *
+            this.neededHeight = (wave_size + 4 + valu_count * 4) *
                 this.globals().gpuConfig["CU_count"] * this.globals().gpuConfig["waves_per_cu"] + 3 * 512;
         }
         this.draw = false;
@@ -286,6 +343,7 @@ class CanvasComponent extends React.Component {
         if (this.globals().active_mask_history) {
             let history = this.globals().active_mask_history;
             if (history.length > 0) {
+
                 var canvas = this.ctx;
                 canvas.font = "14px Monaco, monospace";
                 var welcomeMessage = "exec mask history";
@@ -299,57 +357,77 @@ class CanvasComponent extends React.Component {
                 for (var i = 0; i < history.length; i++) {
                     this.neededHeight = Math.max(this.neededHeight, y);
                     y = exec_mask_offset;
-                    for (var j = 0; j < history[0].length; j++) {
-                        if (j % 32 == 0)
-                            y += 4;
-                        if (history[i][j] == 1) {
-                            this.ctx.fillStyle = "white";
-                        } else if (history[i][j] == 0) {
-                            this.ctx.fillStyle = "black";
-                        } else if (history[i][j] == 2) {
-                            this.ctx.fillStyle = "grey";
-                        } else if (history[i][j] == 3) {
-                            this.ctx.fillStyle = "blue";
-                        } else if (history[i][j] == 4) {
-                            this.ctx.fillStyle = "red";
+                    for (var cu_id = 0; cu_id < cu_count; cu_id++) {
+                        for (var wave_id = 0; wave_id < waves_per_cu; wave_id++) {
+                            for (var lane_id = 0; lane_id < wave_size; lane_id++) {
+                                let j = cu_id * waves_per_cu * wave_size + wave_id * wave_size + lane_id;
+                                if (j % wave_size == 0)
+                                    y += 4;
+                                if (history[i][j] == 1) {
+                                    this.ctx.fillStyle = "white";
+                                } else if (history[i][j] == 0) {
+                                    this.ctx.fillStyle = "black";
+                                } else if (history[i][j] == 2) {
+                                    this.ctx.fillStyle = "grey";
+                                } else if (history[i][j] == 3) {
+                                    this.ctx.fillStyle = "blue";
+                                } else if (history[i][j] == 4) {
+                                    this.ctx.fillStyle = "red";
+                                }
+                                this.ctx.fillRect(x, y, 1, 1);
+                                y += 1;
+                            }
                         }
-                        this.ctx.fillRect(x, y, 1, 1);
-                        y += 1;
+                        y += 4;
+                        {
+                            let history = this.globals().alu_active_history;
+                            for (var valu_id = 0; valu_id < valu_count; valu_id++) {
+
+                                let j = cu_id * valu_count + valu_id;
+                                if (history[i][j] == 1) {
+                                    this.ctx.fillStyle = "white";
+                                } else if (history[i][j] == 0) {
+                                    this.ctx.fillStyle = "black";
+                                }
+                                this.ctx.fillRect(x, y, 1, 1);
+                                y += 4;
+                            }
+                        }
                     }
                     x += 1;
                 }
                 this.neededWidth = Math.max(this.neededWidth, x);
             }
         }
-        if (this.globals().alu_active_history) {
-            let history = this.globals().alu_active_history;
-            if (history.length > 0) {
-                var canvas = this.ctx;
-                canvas.font = "14px Monaco, monospace";
-                var welcomeMessage = "ALU Active history";
-                canvas.textAlign = "start";
-                canvas.textBaseline = "top";
-                canvas.fillStyle = "#ffffff";
-                canvas.fillText(welcomeMessage, 0, y + 16);
-                var exec_mask_offset = y + 32;
-                x = 0;
-                for (var i = 0; i < history.length; i++) {
-                    this.neededHeight = Math.max(this.neededHeight, y);
-                    y = exec_mask_offset;
-                    for (var j = 100; j >= 0; j--) {
-                        if (j <= history[i]) {
-                            this.ctx.fillStyle = "white";
-                        } else {
-                            this.ctx.fillStyle = "black";
-                        }
-                        this.ctx.fillRect(x, y, 1, 1);
-                        y += 1;
-                    }
-                    x += 1;
-                }
-                this.neededWidth = Math.max(this.neededWidth, x);
-            }
-        }
+        // if (this.globals().alu_active_history) {
+        //     let history = this.globals().alu_active_history;
+        //     if (history.length > 0) {
+        //         var canvas = this.ctx;
+        //         canvas.font = "14px Monaco, monospace";
+        //         var welcomeMessage = "ALU Active history";
+        //         canvas.textAlign = "start";
+        //         canvas.textBaseline = "top";
+        //         canvas.fillStyle = "#ffffff";
+        //         canvas.fillText(welcomeMessage, 0, y + 16);
+        //         var exec_mask_offset = y + 32;
+        //         x = 0;
+        //         for (var i = 0; i < history.length; i++) {
+        //             this.neededHeight = Math.max(this.neededHeight, y);
+        //             y = exec_mask_offset;
+        //             for (var j = 100; j >= 0; j--) {
+        //                 if (j <= history[i]) {
+        //                     this.ctx.fillStyle = "white";
+        //                 } else {
+        //                     this.ctx.fillStyle = "black";
+        //                 }
+        //                 this.ctx.fillRect(x, y, 1, 1);
+        //                 y += 1;
+        //             }
+        //             x += 1;
+        //         }
+        //         this.neededWidth = Math.max(this.neededWidth, x);
+        //     }
+        // }
         {
             var canvas = this.ctx;
             canvas.font = "14px Monaco, monospace";
@@ -462,7 +540,7 @@ class CanvasComponent extends React.Component {
     render() {
         return <div>
             <button style={{ margin: 10 }} onClick={this.scheduleDraw}>
-                Draw
+                Render History
             </button>
             <canvas ref="canvas" /> </div>;
     }
@@ -475,7 +553,7 @@ class GoldenLayoutWrapper extends React.Component {
                     this.globals.run = false;
                 } else {
                     this.globals.active_mask_history.push(this.globals.wasm.guppy_get_active_mask());
-                    this.globals.alu_active_history.push(this.globals.wasm.guppy_get_gpu_metric("ALU active"));
+                    this.globals.alu_active_history.push(this.globals.wasm.guppy_get_valu_active());
                     this.globals.samplers_metric_history.push([
                         this.globals.wasm.guppy_get_gpu_metric("Samplers cache hit"),
                         this.globals.wasm.guppy_get_gpu_metric("Samplers cache miss"),
@@ -503,8 +581,8 @@ class GoldenLayoutWrapper extends React.Component {
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
             "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 16, "ALU_per_cu": 1, "waves_per_cu": 4, "fd_per_cu": 1,
-            "ALU_pipe_len": 4
+            "CU_count": 64, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "ALU_pipe_len": 1
         };
         this.globals.wasm = null;
         this.globals.r_images = [];
@@ -540,8 +618,8 @@ class GoldenLayoutWrapper extends React.Component {
                                     },
                                     {
                                         type: 'react-component',
-                                        component: 'Memory',
-                                        title: 'Memory',
+                                        component: 'Bindings',
+                                        title: 'Bindings',
                                         props: { globals: () => this.globals }
                                     }
                                 ]
@@ -555,8 +633,8 @@ class GoldenLayoutWrapper extends React.Component {
                         content: [
                             {
                                 type: 'react-component',
-                                component: 'Canvas',
-                                title: 'Canvas',
+                                component: 'Graphs',
+                                title: 'Graphs',
                                 props: { globals: () => this.globals }
 
                             },
@@ -580,6 +658,7 @@ class GoldenLayoutWrapper extends React.Component {
             globals.run = false;
             globals.wasm.guppy_create_gpu_state(
                 JSON.stringify(globals.gpuConfig));
+            globals.wasm.guppy_init_framebuffer(256, 256);
             globals.active_mask_history = [];
             globals.alu_active_history = [];
             globals.samplers_metric_history = [];
@@ -589,11 +668,13 @@ class GoldenLayoutWrapper extends React.Component {
             layout.updateSize();
             this.globals.wasm = wasm;
             this.globals.resetGPU();
+            if (this.globals.updateMemory)
+                this.globals.updateMemory();
             //console.log("wasm loaded");
             //console.log(wasm.guppy_get_config());
 
         });
-        layout.registerComponent('Canvas', CanvasComponent
+        layout.registerComponent('Graphs', GraphsComponent
         );
         layout.registerComponent('TextEditor',
             TextEditorComponent
@@ -601,8 +682,8 @@ class GoldenLayoutWrapper extends React.Component {
         layout.registerComponent('Parameters',
             ParametersComponent
         );
-        layout.registerComponent('Memory',
-            MemoryComponent
+        layout.registerComponent('Bindings',
+            BindingsComponent
         );
         layout.registerComponent('Readme',
             ReadmeComponent

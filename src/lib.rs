@@ -197,10 +197,34 @@ fn GTF32(this_: &Value, that_: &Value) -> Value {
 fn Clamp(this_: &Value) -> Value {
     let this = castToFValue(this_);
     castToValue(&[
-        if this[0] > 1.0 { 1.0 } else if this[0] < 0.0 { 0.0 } else {this[0]},
-        if this[1] > 1.0 { 1.0 } else if this[1] < 0.0 { 0.0 } else {this[1]},
-        if this[2] > 1.0 { 1.0 } else if this[2] < 0.0 { 0.0 } else {this[2]},
-        if this[3] > 1.0 { 1.0 } else if this[3] < 0.0 { 0.0 } else {this[3]},
+        if this[0] > 1.0 {
+            1.0
+        } else if this[0] < 0.0 {
+            0.0
+        } else {
+            this[0]
+        },
+        if this[1] > 1.0 {
+            1.0
+        } else if this[1] < 0.0 {
+            0.0
+        } else {
+            this[1]
+        },
+        if this[2] > 1.0 {
+            1.0
+        } else if this[2] < 0.0 {
+            0.0
+        } else {
+            this[2]
+        },
+        if this[3] > 1.0 {
+            1.0
+        } else if this[3] < 0.0 {
+            0.0
+        } else {
+            this[3]
+        },
     ])
 }
 
@@ -218,7 +242,7 @@ fn Norm(this_: &Value) -> Value {
 fn Len(this_: &Value) -> Value {
     let x = castToFValue(this_);
     let len = f32::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]);
-        castToValue(&[len,  len,  len, len])
+    castToValue(&[len, len, len, len])
 }
 
 fn AbsF32(this_: &Value) -> Value {
@@ -529,7 +553,7 @@ struct DispInstruction {
 }
 
 struct VALUState {
-    active: bool,
+    was_active: bool,
     // Size is fixed
     pipe: Vec<Option<DispInstruction>>,
 }
@@ -562,6 +586,9 @@ impl VALUState {
         }
         self.pipe = new_pipe;
         last
+    }
+    fn active(&self) -> bool {
+        self.was_active || self.pipe.iter().any(|it| it.is_some())
     }
     fn ready(&self) -> bool {
         self.pipe.first().unwrap().is_none()
@@ -844,7 +871,7 @@ impl CUState {
                 pipe.push(None);
             }
             valus.push(VALUState {
-                active: false,
+                was_active: false,
                 pipe: pipe,
             });
         }
@@ -901,7 +928,7 @@ impl GPUState {
         let mut res: u32 = 0;
         for cu in &self.cus {
             for alu in &cu.valus {
-                if alu.active {
+                if alu.active() {
                     res += 1;
                 }
             }
@@ -1457,11 +1484,10 @@ impl GPUState {
     fn valu_clock(&mut self, cu_id: u32, valu_id: u32) {
         let valu = &mut self.cus[cu_id as usize].valus[valu_id as usize];
         let inst = valu.pop();
-        valu.active = false;
+        valu.was_active = false;
         if inst.is_some() {
-            valu.active = true;
             // didSomeWork = true;
-
+            valu.was_active = true;
             let dispInst = inst.unwrap();
             let mut wave = &mut self.cus[cu_id as usize].waves[dispInst.wave_id as usize];
             let exec_mask = &dispInst.exec_mask.as_ref().unwrap();
@@ -1557,7 +1583,12 @@ impl GPUState {
                         }
                     }
                 }
-                InstTy::MOV | InstTy::UTOF | InstTy::NORM | InstTy::ABS | InstTy::LEN | InstTy::CLAMP => {
+                InstTy::MOV
+                | InstTy::UTOF
+                | InstTy::NORM
+                | InstTy::ABS
+                | InstTy::LEN
+                | InstTy::CLAMP => {
                     let src1 = dispInst.src[0].as_ref().unwrap();
                     let dst = match &inst.ops[0] {
                         Operand::VRegister(dst) => dst,
@@ -1663,7 +1694,7 @@ impl GPUState {
             | InstTy::LD => {
                 inst.assertThreeOp();
             }
-            InstTy::SAMPLE | InstTy::MAD| InstTy::LERP => {
+            InstTy::SAMPLE | InstTy::MAD | InstTy::LERP => {
                 inst.assertFourOp();
             }
             InstTy::BR_PUSH
@@ -1674,7 +1705,12 @@ impl GPUState {
             | InstTy::MASK_NZ => {
                 control_flow_cmd = true;
             }
-            InstTy::MOV | InstTy::UTOF | InstTy::NORM  | InstTy::ABS | InstTy::LEN| InstTy::CLAMP => {
+            InstTy::MOV
+            | InstTy::UTOF
+            | InstTy::NORM
+            | InstTy::ABS
+            | InstTy::LEN
+            | InstTy::CLAMP => {
                 inst.assertTwoOp();
             }
             _ => {
@@ -2790,7 +2826,7 @@ fn parse(text: &str) -> Vec<Instruction> {
         };
         // println!("{:?}", operands);
         let instr = match command.as_str() {
-            "mov" | "utof" | "norm" | "abs.f32" | "len" | "clamp"  => {
+            "mov" | "utof" | "norm" | "abs.f32" | "len" | "clamp" => {
                 assert!(operands.len() == 2);
                 let dstRef = parseOperand(&operands[0]);
                 let srcRef = parseOperand(&operands[1]);
@@ -3015,8 +3051,12 @@ fn parse(text: &str) -> Vec<Instruction> {
         if InstTy::BR_PUSH == inst.ty {
             let new_indices = match (&inst.ops[1], &inst.ops[2]) {
                 (Operand::Label(else_label), Operand::Label(converge_label)) => (
-                    *line_map.get(&label_line_map.get(else_label).unwrap()).unwrap(),
-                    *line_map.get(&label_line_map.get(converge_label).unwrap()).unwrap(),
+                    *line_map
+                        .get(&label_line_map.get(else_label).unwrap())
+                        .unwrap(),
+                    *line_map
+                        .get(&label_line_map.get(converge_label).unwrap())
+                        .unwrap(),
                 ),
                 _ => panic!(""),
             };
@@ -3242,7 +3282,7 @@ pub fn guppy_init_framebuffer(width: u32, height: u32) -> u32 {
         format: TextureFormat::RGBA8_UNORM,
     }));
     for i in 0..width * height {
-        gpu_state.mem.push(0);
+        gpu_state.mem.push(0xff);
     }
 
     bind_state.rw_views.len() as u32 - 1
@@ -3362,6 +3402,33 @@ pub fn guppy_get_active_mask() -> Vec<u8> {
     active_mask
 }
 
+#[wasm_bindgen]
+pub fn guppy_get_valu_active() -> Vec<u8> {
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+    let mut active_mask: Vec<u8> = Vec::new();
+    let pipe_size = gpu_state.config.ALU_pipe_len;
+    for cu in &gpu_state.cus {
+        for alu in &cu.valus {
+            if alu.active() {
+                active_mask.push(1);
+            } else {
+                active_mask.push(0);
+            }
+            // for cmd in &alu.pipe[1..] {
+            //     match &cmd {
+            //         Some(disp) => {
+            //             active_mask.push(1);
+            //         }
+            //         None => {
+            //             active_mask.push(0);
+            //         }
+            //     }
+            // }
+        }
+    }
+    active_mask
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3476,7 +3543,7 @@ abs.f32 r10.xyz, r5.www
 push_mask L1
 mask_nz r13.x
 norm r15.xyz, r15.xyz
-sample r10.xyzw, t0.xyzw, s0, r15.xy
+sample r10.xyzw, t1.xyzw, s0, r15.xy
 pop_mask
 L1:
 ; mov r5.xyz, r32.www
@@ -3498,10 +3565,10 @@ ret",
             sampler_latency: 1,
             VGPRF_per_pe: 128,
             wave_size: 32,
-            CU_count: 16,
-            ALU_per_cu: 16,
-            waves_per_cu: 16,
-            fd_per_cu: 16,
+            CU_count: 64,
+            ALU_per_cu: 4,
+            waves_per_cu: 4,
+            fd_per_cu: 4,
             ALU_pipe_len: 1,
         };
         let mut gpu_state = GPUState::new(&config);
@@ -3519,6 +3586,13 @@ ret",
                     mem.push(((i * TEXTURE_SIZE) << 8) | 0xff);
                 }
             }
+            for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE) {
+                if i % (TEXTURE_SIZE / 4) == 0 || i % (TEXTURE_SIZE * 4) < TEXTURE_SIZE {
+                    mem.push(((i * TEXTURE_SIZE) << 16) | 0xff);
+                } else {
+                    mem.push(((i * TEXTURE_SIZE) << 8) | 0xff);
+                }
+            }
             for i in 0..(AMP_K * AMP_K * TEXTURE_SIZE * TEXTURE_SIZE) {
                 mem.push(0);
             }
@@ -3528,14 +3602,21 @@ ret",
         }
         let program = Program { ins: res };
         let out_view = Texture2D {
-            offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 4,
+            offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 8,
             pitch: AMP_K * TEXTURE_SIZE * 4,
             width: AMP_K * TEXTURE_SIZE,
             height: AMP_K * TEXTURE_SIZE,
             format: TextureFormat::RGBA8_UNORM,
         };
-        let in_view = Texture2D {
+        let in_view_0 = Texture2D {
             offset: 64,
+            pitch: TEXTURE_SIZE * 4,
+            width: TEXTURE_SIZE,
+            height: TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
+        let in_view_1 = Texture2D {
+            offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 4,
             pitch: TEXTURE_SIZE * 4,
             width: TEXTURE_SIZE,
             height: TEXTURE_SIZE,
@@ -3544,14 +3625,17 @@ ret",
         dispatch(
             &mut gpu_state,
             &program,
-            vec![View::TEXTURE2D(in_view.clone())],
+            vec![
+                View::TEXTURE2D(in_view_0.clone()),
+                View::TEXTURE2D(in_view_1.clone()),
+            ],
             vec![View::TEXTURE2D(out_view.clone())],
             vec![Sampler {
                 wrap_mode: WrapMode::WRAP,
                 sample_mode: SampleMode::BILINEAR,
             }],
             32,
-            1//(TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
+            (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
         while let Some(events) = clock(&mut gpu_state) {
             // println!("{:?}", gpu_state.l2.cache_table.miss_cnt);
@@ -3585,7 +3669,7 @@ ret",
             //             );
             //println!("{:?}", gpu_state.get_alu_active());
         }
-        save_image(&gpu_state, &in_view, "in.png");
+        save_image(&gpu_state, &in_view_0, "in.png");
         save_image(&gpu_state, &out_view, "out.png");
     }
 
