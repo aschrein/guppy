@@ -553,6 +553,8 @@ struct DispInstruction {
 }
 
 struct VALUState {
+    last_retired_wave: Option<u32>,
+    last_dispatched_wave: Option<u32>,
     was_active: bool,
     // Size is fixed
     pipe: Vec<Option<DispInstruction>>,
@@ -592,6 +594,14 @@ impl VALUState {
     }
     fn ready(&self) -> bool {
         self.pipe.first().unwrap().is_none()
+    }
+    fn last_dispatched_wave(&self) -> Option<u32> {
+        for item in &self.pipe {
+            if let Some(inst) = item {
+                return Some(inst.wave_id);
+            }
+        }
+        None
     }
     fn push(&mut self, inst: &DispInstruction) -> bool {
         if self.pipe.first().unwrap().is_none() {
@@ -871,6 +881,8 @@ impl CUState {
                 pipe.push(None);
             }
             valus.push(VALUState {
+                last_retired_wave: None,
+                last_dispatched_wave: None,
                 was_active: false,
                 pipe: pipe,
             });
@@ -1483,12 +1495,16 @@ impl GPUState {
     }
     fn valu_clock(&mut self, cu_id: u32, valu_id: u32) {
         let valu = &mut self.cus[cu_id as usize].valus[valu_id as usize];
+        valu.last_dispatched_wave = valu.last_dispatched_wave();
+
         let inst = valu.pop();
         valu.was_active = false;
+        valu.last_retired_wave = None;
         if inst.is_some() {
             // didSomeWork = true;
             valu.was_active = true;
             let dispInst = inst.unwrap();
+            valu.last_retired_wave = Some(dispInst.wave_id);
             let mut wave = &mut self.cus[cu_id as usize].waves[dispInst.wave_id as usize];
             let exec_mask = &dispInst.exec_mask.as_ref().unwrap();
             let inst = dispInst.instr.unwrap();
@@ -2135,7 +2151,7 @@ impl GPUState {
             let wave_id = {
                 let fe = &mut self.cus[cu_id as usize].fes[fe_id];
                 let wave_id = fe.wave_id;
-                fe.wave_id += 1;
+                fe.wave_id += self.config.fd_per_cu;
                 fe.wave_id = fe.wave_id % self.config.waves_per_cu;
                 wave_id
             };
@@ -3380,16 +3396,16 @@ pub fn guppy_get_active_mask() -> Vec<u8> {
         for wave in &cu.waves {
             if wave.enabled {
                 for bit in &wave.exec_mask {
-                    if wave.stalled {
-                        active_mask.push(3);
-                    } else if !wave.has_been_dispatched {
-                        active_mask.push(4);
-                    } else {
-                        if *bit {
-                            active_mask.push(1);
+                    if *bit {
+                        if wave.stalled {
+                            active_mask.push(3);
+                        } else if !wave.has_been_dispatched {
+                            active_mask.push(4);
                         } else {
-                            active_mask.push(0);
+                            active_mask.push(1);
                         }
+                    } else {
+                        active_mask.push(0);
                     }
                 }
             } else {
@@ -3403,16 +3419,20 @@ pub fn guppy_get_active_mask() -> Vec<u8> {
 }
 
 #[wasm_bindgen]
-pub fn guppy_get_valu_active() -> Vec<u8> {
+pub fn guppy_get_valu_active() -> Vec<i32> {
     let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
-    let mut active_mask: Vec<u8> = Vec::new();
+    let mut active_mask: Vec<i32> = Vec::new();
     let pipe_size = gpu_state.config.ALU_pipe_len;
     for cu in &gpu_state.cus {
         for alu in &cu.valus {
-            if alu.active() {
-                active_mask.push(1);
+            if let Some(wave_id) = alu.last_dispatched_wave {
+                active_mask.push(wave_id as i32);
             } else {
-                active_mask.push(0);
+                if alu.active() {
+                    active_mask.push(-1);
+                } else {
+                    active_mask.push(-2);
+                }
             }
             // for cmd in &alu.pipe[1..] {
             //     match &cmd {

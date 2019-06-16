@@ -9,6 +9,8 @@ import 'brace/mode/assembly_x86';
 import 'brace/theme/tomorrow_night_eighties';
 import { JSONEditor } from 'react-json-editor-viewer';
 import raymarcher_s from './asm/raymarcher.s';
+import branch_1_s from './asm/branch_1.s';
+import branch_2_s from './asm/branch_2.s';
 import readme_md from './Readme.md';
 
 function onChange(newValue) {
@@ -69,7 +71,7 @@ class TextEditorComponent extends React.Component {
         }
     }
     render() {
-        let def_value = raymarcher_s;
+        let def_value = branch_2_s;
         this.text = def_value;
         return (
             <div className="ace_editor_container">
@@ -283,6 +285,7 @@ class GraphsComponent extends React.Component {
         this.updateCanvas = this.updateCanvas.bind(this);
         this.onResize = this.onResize.bind(this);
         this.scheduleDraw = this.scheduleDraw.bind(this);
+        this.colorMap = {};
     }
 
     componentDidMount() {
@@ -292,7 +295,7 @@ class GraphsComponent extends React.Component {
         this.lastClock = 0;
         this.props.glContainer.on('resize', this.onResize);
         this.globals = this.props.globals;
-        this.globals().updateCanvas = this.updateCanvas;
+        this.globals().updateCanvas = this.scheduleDraw;
 
         this.updateCanvas();
     }
@@ -309,10 +312,19 @@ class GraphsComponent extends React.Component {
         this.draw = true;
         this.updateCanvas();
     }
+
     updateCanvas() {
         if (!this.draw) {
             return;
         }
+        let getRandomColor = () => {
+            var letters = '0123456789ABCDEF';
+            var color = '#';
+            for (var i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        };
         let wave_size = this.globals().gpuConfig["wave_size"];
         let waves_per_cu = this.globals().gpuConfig["waves_per_cu"];
         let cu_count = this.globals().gpuConfig["CU_count"];
@@ -330,50 +342,72 @@ class GraphsComponent extends React.Component {
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
         var x = 0;
         var y = 0;
-        {
+        let putTag = (text, x, y) => {
             var canvas = this.ctx;
-            canvas.font = "14px Monaco, monospace";
-            var welcomeMessage = "(white, black, grey, blue, red) = (active, inactive, disabled, stalled, not enough resources)";
+            canvas.font = "10px Monaco, monospace";
             canvas.textAlign = "start";
             canvas.textBaseline = "top";
             canvas.fillStyle = "#ffffff";
-            canvas.fillText(welcomeMessage, x, y);
-            y += 16;
+            canvas.fillText(text, x, y);
+        };
+        let color_sem = {
+            0: "inactive",
+            1: "active",
+            2: "disabled",
+            3: "stalled",
+            4: "idle"
+        };
+        let color_code = {
+            0: "black",
+            1: "white",
+            2: "grey",
+            3: "blue",
+            4: "red"
+        };
+        {
+            var canvas = this.ctx;
+            for (var i = 0; i < 5; i++) {
+                this.ctx.fillStyle = color_code[i];
+                this.ctx.fillRect(x, y, 8, 8);
+                canvas.font = "14px Monaco, monospace";
+                canvas.textAlign = "start";
+                canvas.textBaseline = "top";
+                canvas.fillStyle = "#ffffff";
+                canvas.fillText(color_sem[i], x + 8, y);
+                y += 12;
+            }
         }
         if (this.globals().active_mask_history) {
             let history = this.globals().active_mask_history;
             if (history.length > 0) {
 
                 var canvas = this.ctx;
-                canvas.font = "14px Monaco, monospace";
-                var welcomeMessage = "exec mask history";
-                canvas.textAlign = "start";
-                canvas.textBaseline = "top";
-                canvas.fillStyle = "#ffffff";
-                canvas.fillText(welcomeMessage, x, y);
                 // console.log('updateCanvas', history[0].length);
-
+                x = 48;
                 var exec_mask_offset = y + 16;
                 for (var i = 0; i < history.length; i++) {
                     this.neededHeight = Math.max(this.neededHeight, y);
-                    y = exec_mask_offset;
+                    y = exec_mask_offset + 4;
                     for (var cu_id = 0; cu_id < cu_count; cu_id++) {
+                        y += 8;
+                        if (i == 0)
+                            putTag("CU#" + cu_id, 0, y);
+                        y += 12;
                         for (var wave_id = 0; wave_id < waves_per_cu; wave_id++) {
+                            if (i == 0) {
+                                putTag("wave#" + wave_id, 0, y + wave_size / 2);
+                                if (!(wave_id in this.colorMap)) {
+                                    this.colorMap[wave_id] = getRandomColor();
+                                }
+                                this.ctx.fillStyle = this.colorMap[wave_id];
+                                this.ctx.fillRect(38, y + wave_size / 2, 4, 4);
+                            }
+
                             for (var lane_id = 0; lane_id < wave_size; lane_id++) {
                                 let j = cu_id * waves_per_cu * wave_size + wave_id * wave_size + lane_id;
                                 if (j % wave_size == 0)
                                     y += 4;
-                                if (history[i][j] == 1) {
-                                    this.ctx.fillStyle = "white";
-                                } else if (history[i][j] == 0) {
-                                    this.ctx.fillStyle = "black";
-                                } else if (history[i][j] == 2) {
-                                    this.ctx.fillStyle = "grey";
-                                } else if (history[i][j] == 3) {
-                                    this.ctx.fillStyle = "blue";
-                                } else if (history[i][j] == 4) {
-                                    this.ctx.fillStyle = "red";
-                                }
+                                this.ctx.fillStyle = color_code[history[i][j]];
                                 this.ctx.fillRect(x, y, 1, 1);
                                 y += 1;
                             }
@@ -382,15 +416,18 @@ class GraphsComponent extends React.Component {
                         {
                             let history = this.globals().alu_active_history;
                             for (var valu_id = 0; valu_id < valu_count; valu_id++) {
-
+                                if (i == 0)
+                                    putTag("ALU#" + valu_id, 0, y);
                                 let j = cu_id * valu_count + valu_id;
-                                if (history[i][j] == 1) {
+                                if (history[i][j] == -1) {
                                     this.ctx.fillStyle = "white";
-                                } else if (history[i][j] == 0) {
+                                } else if (history[i][j] == -2) {
                                     this.ctx.fillStyle = "black";
+                                } else {
+                                    this.ctx.fillStyle = this.colorMap[history[i][j]];
                                 }
-                                this.ctx.fillRect(x, y, 1, 1);
-                                y += 4;
+                                this.ctx.fillRect(x, y, 1, 6);
+                                y += 14;
                             }
                         }
                     }
@@ -428,6 +465,7 @@ class GraphsComponent extends React.Component {
         //         this.neededWidth = Math.max(this.neededWidth, x);
         //     }
         // }
+        return;
         {
             var canvas = this.ctx;
             canvas.font = "14px Monaco, monospace";
@@ -539,7 +577,7 @@ class GraphsComponent extends React.Component {
     }
     render() {
         return <div>
-            <button style={{ margin: 10 }} onClick={this.scheduleDraw}>
+            <button style={{ "margin-left": 32, "margin-right": "50%" }} onClick={this.scheduleDraw}>
                 Render History
             </button>
             <canvas ref="canvas" /> </div>;
@@ -566,7 +604,8 @@ class GoldenLayoutWrapper extends React.Component {
                     ]);
                     //if (this.globals.updateCanvas)
                     this.globals.updateMemory();
-                    // this.globals.updateCanvas();
+                    if (this.globals.dispatchConfig["update graph"])
+                        this.globals.updateCanvas();
                 }
             }
         }
@@ -574,14 +613,14 @@ class GoldenLayoutWrapper extends React.Component {
     componentDidMount() {
         this.globals = {};
         this.globals.dispatchConfig = {
-            "group_size": 32, "groups_count": 2048, "cycles_per_iter": 1
+            "group_size": 32, "groups_count": 7, "cycles_per_iter": 1, "update graph": true
         };
         this.globals.gpuConfig = {
             "DRAM_latency": 32,
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
             "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 64, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "CU_count": 2, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
             "ALU_pipe_len": 1
         };
         this.globals.wasm = null;
@@ -608,18 +647,18 @@ class GoldenLayoutWrapper extends React.Component {
 
                             },
                             {
-                                type: 'row',
+                                type: 'stack',
                                 content: [
-                                    {
-                                        type: 'react-component',
-                                        component: 'Parameters',
-                                        title: 'Parameters',
-                                        props: { globals: () => this.globals }
-                                    },
                                     {
                                         type: 'react-component',
                                         component: 'Bindings',
                                         title: 'Bindings',
+                                        props: { globals: () => this.globals }
+                                    },
+                                    {
+                                        type: 'react-component',
+                                        component: 'Parameters',
+                                        title: 'Parameters',
                                         props: { globals: () => this.globals }
                                     }
                                 ]
