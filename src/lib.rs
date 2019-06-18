@@ -3434,19 +3434,21 @@ pub fn guppy_get_valu_active() -> Vec<i32> {
                     active_mask.push(-2);
                 }
             }
-            // for cmd in &alu.pipe[1..] {
-            //     match &cmd {
-            //         Some(disp) => {
-            //             active_mask.push(1);
-            //         }
-            //         None => {
-            //             active_mask.push(0);
-            //         }
-            //     }
-            // }
         }
     }
     active_mask
+}
+
+#[wasm_bindgen]
+pub fn guppy_get_sampler_cache_metrics() -> Vec<u32> {
+    let gpu_state = unsafe { g_gpu_state.as_mut().unwrap() };
+    let mut out: Vec<u32> = Vec::new();
+    for cu in &gpu_state.cus {
+        out.push(cu.sampler.cache_table.hit_cnt);
+        out.push(cu.sampler.cache_table.miss_cnt);
+        out.push(cu.sampler.cache_table.evict_cnt);
+    }
+    out
 }
 
 #[cfg(test)]
