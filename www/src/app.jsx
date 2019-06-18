@@ -61,6 +61,7 @@ class TextEditorComponent extends React.Component {
     }
     setText(text) {
         this.refs.editor.editor.setValue(text);
+        console.log(this.refs.editor);
     }
 
     Execute() {
@@ -105,7 +106,7 @@ class TextEditorComponent extends React.Component {
                     </button>
                 </div>
                 <AceEditor
-                    value={""}
+                    value={this.text}
                     ref="editor"
                     mode="assembly_x86"
                     theme="tomorrow_night_eighties"
