@@ -1653,8 +1653,9 @@ impl GPUState {
         if !wave.enabled {
             return;
         }
-        assert!(!wave.has_been_dispatched && !wave.stalled);
+        assert!(!wave.has_been_dispatched);
         wave.clock_counter += 1;
+        wave.stalled = false;
         // At least we have some wave that must be doing something
         // didSomeWork = true;
         // This wave might be stalled because of instruction dependencies
@@ -2143,25 +2144,32 @@ impl GPUState {
 
         for wave in &mut self.cus[cu_id as usize].waves {
             wave.has_been_dispatched = false;
-            wave.stalled = false;
         }
+        let mut wave_stalled = false;
         for fe_id in 0..self.cus[cu_id as usize].fes.len() {
             let mut gather_reqs: Vec<(u32, u32, Vec<LDReq>)> = Vec::new();
             let mut sample_reqs: Vec<SampleReq> = Vec::new();
             let wave_id = {
                 let fe = &mut self.cus[cu_id as usize].fes[fe_id];
                 let wave_id = fe.wave_id;
-                fe.wave_id += self.config.fd_per_cu;
-                fe.wave_id = fe.wave_id % self.config.waves_per_cu;
                 wave_id
             };
             self.fetch_decode(cu_id, wave_id, &mut gather_reqs, &mut sample_reqs);
+            wave_stalled |= self.cus[cu_id as usize].waves[wave_id as usize].stalled;
             // Put memory requests
             for req in &sample_reqs {
                 assert!(self.sample(&req));
             }
             for (cu_id, wave_id, gather) in &gather_reqs {
                 self.wave_gather(*cu_id, *wave_id, gather);
+            }
+        }
+        if wave_stalled {
+            for fe_id in 0..self.cus[cu_id as usize].fes.len() {
+                let fe = &mut self.cus[cu_id as usize].fes[fe_id];
+                let wave_id = fe.wave_id;
+                fe.wave_id += self.config.fd_per_cu;
+                fe.wave_id = fe.wave_id % self.config.waves_per_cu;
             }
         }
         self.l1_clock(cu_id as u32);

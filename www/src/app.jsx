@@ -11,6 +11,8 @@ import { JSONEditor } from 'react-json-editor-viewer';
 import raymarcher_s from './asm/raymarcher.s';
 import branch_1_s from './asm/branch_1.s';
 import branch_2_s from './asm/branch_2.s';
+import branch_3_s from './asm/branch_3.s';
+import branch_4_s from './asm/branch_4.s';
 import readme_md from './Readme.md';
 
 function onChange(newValue) {
@@ -61,7 +63,6 @@ class TextEditorComponent extends React.Component {
     }
     setText(text) {
         this.refs.editor.editor.setValue(text);
-        console.log(this.refs.editor);
     }
 
     Execute() {
@@ -103,6 +104,12 @@ class TextEditorComponent extends React.Component {
                     </button>
                     <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_2}>
                         branch_2
+                    </button>
+                    <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_3}>
+                        branch_3
+                    </button>
+                    <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_4}>
+                        branch_4
                     </button>
                 </div>
                 <AceEditor
@@ -442,7 +449,7 @@ class GraphsComponent extends React.Component {
             }
             let history = this.globals().active_mask_history;
             if (history.length > 0) {
-                putTag("Clocks:" + this.globals().clocks, 0, y);
+                putTag("cycles:" + this.globals().clocks, 0, y);
                 var canvas = this.ctx;
                 // console.log('updateCanvas', history[0].length);
                 x = HISTORY_OFFSET;
@@ -453,7 +460,7 @@ class GraphsComponent extends React.Component {
                     for (var cu_id = 0; cu_id < cu_count; cu_id++) {
                         y += 8;
                         if (i == 0)
-                            putTag("CU#" + cu_id, 0, y);
+                            putTag("core#" + cu_id, 0, y);
                         y += 12;
                         for (var wave_id = 0; wave_id < waves_per_cu; wave_id++) {
                             if (i == 0) {
@@ -606,6 +613,8 @@ class GoldenLayoutWrapper extends React.Component {
         this.setupRaymarching = this.setupRaymarching.bind(this);
         this.setupBranch_1 = this.setupBranch_1.bind(this);
         this.setupBranch_2 = this.setupBranch_2.bind(this);
+        this.setupBranch_3 = this.setupBranch_3.bind(this);
+        this.setupBranch_4 = this.setupBranch_4.bind(this);
     }
     setupRaymarching() {
         this.globals.dispatchConfig = {
@@ -616,7 +625,7 @@ class GoldenLayoutWrapper extends React.Component {
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
             "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 64, "ALU_per_cu": 4, "waves_per_cu": 4, "fd_per_cu": 4,
+            "CU_count": 2, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
             "ALU_pipe_len": 1
         };
         this.globals.setText(raymarcher_s);
@@ -625,14 +634,14 @@ class GoldenLayoutWrapper extends React.Component {
 
     setupBranch_1() {
         this.globals.dispatchConfig = {
-            "group_size": 32, "groups_count": 6, "cycles_per_iter": 1, "update graph": true
+            "group_size": 32, "groups_count": 1, "cycles_per_iter": 1, "update graph": true
         };
         this.globals.gpuConfig = {
             "DRAM_latency": 32,
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
             "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 2, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
+            "CU_count": 1, "ALU_per_cu": 1, "waves_per_cu": 1, "fd_per_cu": 1,
             "ALU_pipe_len": 1
         };
         this.globals.setText(branch_1_s);
@@ -641,20 +650,49 @@ class GoldenLayoutWrapper extends React.Component {
 
     setupBranch_2() {
         this.globals.dispatchConfig = {
-            "group_size": 32, "groups_count": 6, "cycles_per_iter": 1, "update graph": true
+            "group_size": 32, "groups_count": 1, "cycles_per_iter": 1, "update graph": true
         };
         this.globals.gpuConfig = {
             "DRAM_latency": 32,
             "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
             "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
             "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
-            "CU_count": 2, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
+            "CU_count": 1, "ALU_per_cu": 1, "waves_per_cu": 1, "fd_per_cu": 1,
             "ALU_pipe_len": 1
         };
         this.globals.setText(branch_2_s);
         this.globals.resetGPU();
     }
-
+    setupBranch_3() {
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 1, "cycles_per_iter": 1, "update graph": true
+        };
+        this.globals.gpuConfig = {
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 1, "ALU_per_cu": 1, "waves_per_cu": 1, "fd_per_cu": 1,
+            "ALU_pipe_len": 1
+        };
+        this.globals.setText(branch_3_s);
+        this.globals.resetGPU();
+    }
+    setupBranch_4() {
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 1, "cycles_per_iter": 1, "update graph": true
+        };
+        this.globals.gpuConfig = {
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 1, "ALU_per_cu": 1, "waves_per_cu": 1, "fd_per_cu": 1,
+            "ALU_pipe_len": 1
+        };
+        this.globals.setText(branch_4_s);
+        this.globals.resetGPU();
+    }
     timer() {
         if (this.globals.wasm && this.globals.run) {
             for (var i = 0; i < this.globals.dispatchConfig["cycles_per_iter"]; i++) {
@@ -696,6 +734,8 @@ class GoldenLayoutWrapper extends React.Component {
         this.globals.clocks = 0;
         this.globals.setupBranch_1 = this.setupBranch_1;
         this.globals.setupBranch_2 = this.setupBranch_2;
+        this.globals.setupBranch_3 = this.setupBranch_3;
+        this.globals.setupBranch_4 = this.setupBranch_4;
         this.globals.setupRaymarching = this.setupRaymarching;
         this.globals.r_images = [];
         this.globals.active_mask_history = null;
