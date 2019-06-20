@@ -889,6 +889,7 @@ impl CUState {
         }
         salus.push(SALUState {});
         assert!(config.fd_per_cu <= config.waves_per_cu);
+        assert!(config.waves_per_cu % config.fd_per_cu == 0);
         let mut fes: Vec<FEState> = Vec::new();
         for i in 0..config.fd_per_cu {
             fes.push(FEState { wave_id: i });
@@ -1204,6 +1205,9 @@ impl GPUState {
         }
     }
     fn wave_gather(&mut self, cu_id: u32, wave_id: u32, reqs: &Vec<LDReq>) {
+        if reqs.is_empty() {
+            return;
+        }
         let page_size = 64 as u32;
         for req in reqs {
             {
@@ -1259,9 +1263,13 @@ impl GPUState {
                             new_reqs.push(new_ldreq);
                         }
                     }
-                    new_wave_q.insert(wave_id, new_reqs);
+                    if new_reqs.len() != 0 {
+                        new_wave_q.insert(wave_id, new_reqs);
+                    }
                 }
-                new_gather_queue.insert(mem_offset, new_wave_q);
+                if new_wave_q.len() != 0 {
+                    new_gather_queue.insert(mem_offset, new_wave_q);
+                }
             }
         }
         // Try to serve the requests
@@ -1288,6 +1296,19 @@ impl GPUState {
             if !served {
                 // Emit the request to L2 cache
                 self.l2_request_page(cu_id, mem_offset);
+                if !new_gather_queue.contains_key(&mem_offset) {
+                    new_gather_queue.insert(mem_offset, HashMap::new());
+                }
+                if !new_gather_queue
+                    .get(&mem_offset)
+                    .unwrap()
+                    .contains_key(&wave_id)
+                {
+                    new_gather_queue
+                        .get_mut(&mem_offset)
+                        .unwrap()
+                        .insert(wave_id, Vec::new());
+                }
                 // Put the request back to the queue
                 new_gather_queue
                     .get_mut(&mem_offset)
@@ -2004,9 +2025,18 @@ impl GPUState {
                     };
                     wave.exec_mask_stack
                         .push((wave.exec_mask.clone(), converge_addr));
-                    wave.exec_mask_stack.push((false_mask, false_addr));
-                    wave.exec_mask = true_mask;
-                    wave.pc += 1;
+                    if false_mask.iter().any(|x| *x) {
+                        wave.exec_mask_stack.push((false_mask, false_addr));
+                    }
+                    if true_mask.iter().any(|x| *x) {
+                        wave.exec_mask = true_mask;
+                        wave.pc += 1;
+                    } else {
+                        assert!(wave.exec_mask_stack.len() != 0);
+                        let prev_mask = wave.exec_mask_stack.pop().unwrap();
+                        wave.exec_mask = prev_mask.0;
+                        wave.pc = prev_mask.1;
+                    }
                     wave.has_been_dispatched = true;
                 }
                 _ => std::panic!("Unsupported branch parameter"),
@@ -2145,7 +2175,7 @@ impl GPUState {
         for wave in &mut self.cus[cu_id as usize].waves {
             wave.has_been_dispatched = false;
         }
-        let mut wave_stalled = false;
+        // let mut fd_switch = true;
         for fe_id in 0..self.cus[cu_id as usize].fes.len() {
             let mut gather_reqs: Vec<(u32, u32, Vec<LDReq>)> = Vec::new();
             let mut sample_reqs: Vec<SampleReq> = Vec::new();
@@ -2155,7 +2185,16 @@ impl GPUState {
                 wave_id
             };
             self.fetch_decode(cu_id, wave_id, &mut gather_reqs, &mut sample_reqs);
-            wave_stalled |= self.cus[cu_id as usize].waves[wave_id as usize].stalled;
+            let fd_switch = {
+                let wave = &self.cus[cu_id as usize].waves[wave_id as usize];
+                wave.stalled || !wave.enabled
+            };
+            if fd_switch {
+                let fe = &mut self.cus[cu_id as usize].fes[fe_id];
+                let wave_id = fe.wave_id;
+                fe.wave_id += self.config.fd_per_cu;
+                fe.wave_id = fe.wave_id % self.config.waves_per_cu;
+            }
             // Put memory requests
             for req in &sample_reqs {
                 assert!(self.sample(&req));
@@ -2164,14 +2203,14 @@ impl GPUState {
                 self.wave_gather(*cu_id, *wave_id, gather);
             }
         }
-        if wave_stalled {
-            for fe_id in 0..self.cus[cu_id as usize].fes.len() {
-                let fe = &mut self.cus[cu_id as usize].fes[fe_id];
-                let wave_id = fe.wave_id;
-                fe.wave_id += self.config.fd_per_cu;
-                fe.wave_id = fe.wave_id % self.config.waves_per_cu;
-            }
-        }
+        // if fd_switch {
+        //     for fe_id in 0..self.cus[cu_id as usize].fes.len() {
+        //         let fe = &mut self.cus[cu_id as usize].fes[fe_id];
+        //         let wave_id = fe.wave_id;
+        //         fe.wave_id += self.config.fd_per_cu;
+        //         fe.wave_id = fe.wave_id % self.config.waves_per_cu;
+        //     }
+        // }
         self.l1_clock(cu_id as u32);
         self.sampler_clock(cu_id as u32);
         for valu_id in 0..self.cus[cu_id as usize].valus.len() {
@@ -3665,7 +3704,7 @@ ret",
                 sample_mode: SampleMode::BILINEAR,
             }],
             32,
-            (TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
+            1//(TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
         );
         while let Some(events) = clock(&mut gpu_state) {
             // println!("{:?}", gpu_state.l2.cache_table.miss_cnt);
@@ -3926,9 +3965,9 @@ ret",
         let config = GPUConfig {
             DRAM_latency: 4,
             DRAM_bandwidth: 64,
-            L1_size: 64 * 3,
+            L1_size: 64,
             L1_latency: 4,
-            L2_size: 64 * 3,
+            L2_size: 64,
             L2_latency: 4,
             sampler_cache_size: 1 << 10,
             sampler_latency: 100,
@@ -3936,9 +3975,9 @@ ret",
             wave_size: 16,
             CU_count: 2,
             ALU_per_cu: 2,
-            waves_per_cu: 8,
-            fd_per_cu: 4,
-            ALU_pipe_len: 1,
+            waves_per_cu: 1,
+            fd_per_cu: 1,
+            ALU_pipe_len: 2,
         };
         let mut gpu_state = GPUState::new(&config);
         gpu_state.mem = vec![
@@ -3975,7 +4014,8 @@ ret",
                 gpu_state.l2.req_queue.len(),
                 gpu_state.cus[0].l1.gather_queue.len()
             );
-            println!("{}", line);
+            // println!("{:?}", gpu_state.cus[0].l1.gather_queue);
+            println!("{:?},",line);
             history.push(line);
         }
         // println!();
@@ -3984,32 +4024,23 @@ ret",
             vec![
                 "1:<0|0|0>",
                 "1:<0|0|0>",
-                "1:<0|0|0>",
-                "1:<0|0|0>",
-                "1:<0|0|0>",
                 "2:<0|0|0>",
                 "2:<0|0|0>",
                 "3:<0|0|3>",
                 "4:<0|0|3>",
                 "4:<0|0|3>",
-                "4:<0|3|3>",
-                "4:<0|3|3>",
-                "4:<0|3|3>",
-                "5:<3|0|3>",
+                "5:<0|3|3>",
+                "5:<0|3|3>",
+                "6:<0|3|4>",
+                "6:<3|0|4>",
                 "6:<3|3|4>",
-                "6:<3|3|4>",
-                "6:<2|3|3>",
-                "6:<1|1|1>",
-                "6:<0|1|1>",
-                "6:<0|1|1>",
-                "6:<1|0|1>",
-                "6:<1|1|1>",
+                "6:<3|4|4>",
+                "6:<2|4|1>",
+                "6:<2|1|1>",
+                "6:<2|0|1>",
+                "6:<2|1|1>",
                 "6:<1|1|1>",
                 "6:<0|1|0>",
-                "7:<0|0|0>",
-                "7:<0|0|0>",
-                "7:<0|0|0>",
-                "7:<0|0|0>",
                 "7:<0|0|0>",
                 "8:<0|0|0>",
                 "8:<0|0|0>",
@@ -4202,8 +4233,8 @@ ret",
             wave_size: 32,
             CU_count: 2,
             ALU_per_cu: 2,
-            waves_per_cu: 16,
-            fd_per_cu: 4,
+            waves_per_cu: 1,
+            fd_per_cu: 1,
             ALU_pipe_len: 4,
         };
         let mut gpu_state = GPUState::new(&config);
