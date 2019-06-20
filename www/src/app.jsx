@@ -429,13 +429,13 @@ class GraphsComponent extends React.Component {
             var canvas = this.ctx;
             for (var i = 0; i < 5; i++) {
                 this.ctx.fillStyle = color_code[i];
-                this.ctx.fillRect(x, y, 8, 8);
-                canvas.font = "14px Monaco, monospace";
+                this.ctx.fillRect(x, y, 16, 16);
+                canvas.font = "24px Monaco, monospace";
                 canvas.textAlign = "start";
                 canvas.textBaseline = "top";
                 canvas.fillStyle = "#ffffff";
-                canvas.fillText(color_sem[i], x + 8, y);
-                y += 12;
+                canvas.fillText(color_sem[i], x + 16, y);
+                y += 22;
             }
         }
         let HISTORY_OFFSET = 48;
