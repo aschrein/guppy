@@ -474,6 +474,18 @@ impl WaveState {
                     }
                     values
                 }
+                BuiltinVal::CLOCK => {
+                    let mut values: Vec<Value> = Vec::new();
+                    for i in 0..wave_width {
+                        values.push([
+                            self.clock_counter,
+                            self.clock_counter,
+                            self.clock_counter,
+                            self.clock_counter,
+                            ]);
+                    }
+                    values
+                }
                 BuiltinVal::WAVE_ID => {
                     let mut values: Vec<Value> = Vec::new();
                     for i in 0..wave_width {
@@ -661,8 +673,8 @@ impl SamplerState {
             reqs.push(None);
         }
         let mut free_reqs: Vec<u32> = Vec::new();
-        for i in 0..gpu_config.wave_size * gpu_config.waves_per_cu {
-            free_reqs.push(i);
+        for i in 0..reqs.len() {
+            free_reqs.push(i as u32);
         }
         SamplerState {
             cache_table: CacheTable::new(gpu_config.sampler_cache_size / 64, 2),
@@ -900,7 +912,7 @@ impl CUState {
             salus: salus,
             fes: fes,
             sampler: SamplerState::new(&config),
-            l1: L1CacheState::new(config.L1_size / 64, 2),
+            l1: L1CacheState::new(config.L1_size / 64, 8),
             slm: SLMState {},
         }
     }
@@ -929,7 +941,7 @@ impl GPUState {
         }
         GPUState {
             cus: cus,
-            l2: L2CacheState::new(config.L2_size / 64, 2),
+            l2: L2CacheState::new(config.L2_size / 64, 8),
             dreqs: VecDeque::new(),
             config: config.clone(),
             mem: Vec::new(),
@@ -1877,7 +1889,6 @@ impl GPUState {
                             texture: texture_id,
                             sampler: sampler_id,
                         });
-                        item.locked = true;
                     }
                 }
             } else {
@@ -1885,11 +1896,23 @@ impl GPUState {
             };
             // Allocate requests in the sampler
             if sampler.get_free_slots() >= wave_sample_request.len() as u32 {
+                // Lock the register
+                if let Operand::VRegister(dst) = &inst.ops[0] {
+                    for (i, item) in wave.vgprfs[dst.id as usize].iter_mut().enumerate() {
+                        if wave.exec_mask[i] {
+                            item.locked = true;
+                        }
+                    }
+                } else {
+                    std::panic!("")
+                };
                 for req in wave_sample_request {
                     sample_reqs.push(req);
                 }
                 wave.pc += 1;
                 wave.has_been_dispatched = true;
+            } else {
+                wave.has_been_dispatched = false;
             }
         } else if let InstTy::ST = inst.ty {
             let addr = wave.getValues(&inst.ops[1]);
@@ -2389,6 +2412,7 @@ enum BuiltinVal {
     WAVE_ID,
     // ID within wave
     LANE_ID,
+    CLOCK,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2850,6 +2874,8 @@ fn parse(text: &str) -> Vec<Instruction> {
             return Operand::Builtin(BuiltinVal::LANE_ID);
         } else if s == "wave_id" {
             return Operand::Builtin(BuiltinVal::WAVE_ID);
+        } else if s == "clock" {
+            return Operand::Builtin(BuiltinVal::CLOCK);
         }
 
         std::panic!(format!("unrecognized {:?}", s))
@@ -3503,6 +3529,170 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mem_dummy_1() {
+        let res = parse(
+            r"
+; Figure out where we are in the screen space
+mov r0.xy, thread_id
+and r0.x, r0.x, u(255)
+div.u32 r0.y, r0.y, u(256)
+mov r0.zw, r0.xy
+
+; put the red color as an indiacation of ongoing work
+st u0.xyzw, r0.zw, f4(1.0 0.0 0.0 1.0)
+
+; Normalize screen coordiantes
+utof r0.xy, r0.xy
+; add 0.5 to fit the center of the texel
+add.f32 r0.xy, r0.xy, f2(0.5 0.5)
+; normalize coordinates
+div.f32 r0.xy, r0.xy, f2(256.0 256.0)
+
+sample r10.xyzw, t0.xyzw, s0, r0.xy
+sample r11.xyzw, t1.xyzw, s0, r0.xy
+sample r12.xyzw, t1.xyzw, s0, r0.xy
+
+lerp r10.xyzw, r10.xyzw, r11.xyzw, r12.x
+
+st u0.xyzw, r0.zw, r10.xyzw
+ret",
+        );
+        let config = GPUConfig {
+            DRAM_latency: 1,
+            DRAM_bandwidth: 768,
+            L1_size: 1 << 14,
+            L1_latency: 1,
+            L2_size: 1 << 10,
+            L2_latency: 4,
+            sampler_cache_size: 1 << 10,
+            sampler_latency: 4,
+            VGPRF_per_pe: 128,
+            wave_size: 32,
+            CU_count: 4,
+            ALU_per_cu: 2,
+            waves_per_cu: 4,
+            fd_per_cu: 2,
+            ALU_pipe_len: 1,
+        };
+        let mut gpu_state = GPUState::new(&config);
+        let TEXTURE_SIZE = 256;
+        let AMP_K = 1;
+        {
+            let mut mem: Vec<u32> = Vec::new();
+            for i in 0..16 {
+                mem.push(0);
+            }
+            for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE) {
+                if i % (TEXTURE_SIZE / 4) == 0 || i % (TEXTURE_SIZE * 4) < TEXTURE_SIZE {
+                    mem.push(((i * TEXTURE_SIZE) << 16) | 0xff);
+                } else {
+                    mem.push(((i * TEXTURE_SIZE) << 8) | 0xff);
+                }
+            }
+            for i in 0..(TEXTURE_SIZE * TEXTURE_SIZE) {
+                if i % (TEXTURE_SIZE / 4) == 0 || i % (TEXTURE_SIZE * 4) < TEXTURE_SIZE {
+                    mem.push(((i * TEXTURE_SIZE) << 16) | 0xff);
+                } else {
+                    mem.push(((i * TEXTURE_SIZE) << 8) | 0xff);
+                }
+            }
+            for i in 0..(AMP_K * AMP_K * TEXTURE_SIZE * TEXTURE_SIZE) {
+                mem.push(0);
+            }
+            mem[16] = 0xffffffff;
+            mem[17] = 0xff0000ff;
+            gpu_state.mem = mem;
+        }
+        let program = Program { ins: res };
+        let out_view = Texture2D {
+            offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 8,
+            pitch: AMP_K * TEXTURE_SIZE * 4,
+            width: AMP_K * TEXTURE_SIZE,
+            height: AMP_K * TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
+        let in_view_0 = Texture2D {
+            offset: 64,
+            pitch: TEXTURE_SIZE * 4,
+            width: TEXTURE_SIZE,
+            height: TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
+        let in_view_1 = Texture2D {
+            offset: 64 + TEXTURE_SIZE * TEXTURE_SIZE * 4,
+            pitch: TEXTURE_SIZE * 4,
+            width: TEXTURE_SIZE,
+            height: TEXTURE_SIZE,
+            format: TextureFormat::RGBA8_UNORM,
+        };
+        dispatch(
+            &mut gpu_state,
+            &program,
+            vec![
+                View::TEXTURE2D(in_view_0.clone()),
+                View::TEXTURE2D(in_view_1.clone()),
+            ],
+            vec![View::TEXTURE2D(out_view.clone())],
+            vec![Sampler {
+                wrap_mode: WrapMode::WRAP,
+                sample_mode: SampleMode::BILINEAR,
+            },
+            Sampler {
+                wrap_mode: WrapMode::WRAP,
+                sample_mode: SampleMode::POINT,
+            }],
+            32,
+            2//(TEXTURE_SIZE * TEXTURE_SIZE * AMP_K * AMP_K) / 32,
+        );
+        while let Some(events) = clock(&mut gpu_state) {
+            // println!("{:?}", gpu_state.l2.cache_table.miss_cnt);
+            if events.len() != 0 {
+                //}
+
+                // for event in &events {
+                //     match event {
+                //         Event::WAVE_RETIRED((cu_id, wave_id)) => {
+                //             print!(
+                //                 " clocks:{}",
+                //                 gpu_state.cus[*cu_id as usize].waves[*wave_id as usize]
+                //                     .clock_counter
+                //             );
+                //         }
+                //         _ => {}
+                //     }
+                // }
+                // println!();
+            }
+            // println!(
+            //                 "{:?},",
+            //                 // gpu_state.cus[0].sampler.free_reqs.len()
+            //                 gpu_state.cus[0].waves[0].vgprfs[12].iter().map(|reg| {
+            //                             if reg.locked {
+            //                                 1
+            //                             } else {
+            //                                 0
+            //                             }
+            //                         }).collect::<Vec<_>>()
+            //             );
+            let line = format!(
+                // "\"{:?}:<{:?}|{:?}|{:?}>\",",
+                "{:?}:<{:?}|{:?}|{:?}|{:?}>",
+                gpu_state.cus[0].waves[0].pc,
+                gpu_state.ld_reqs.len(),
+                gpu_state.l2.req_queue.len(),
+                gpu_state.cus[0].sampler.gather_queue.len(),
+                gpu_state.cus[0].sampler.wait_reqs.len(),
+            );
+            if gpu_state.clock_counter > 100 && gpu_state.cus[0].sampler.wait_reqs.len() == 0 {
+                std::panic!();
+            }
+            // println!("{:?}", gpu_state.cus[0].l1.gather_queue);
+            println!("{:?},", line);
+            //println!("{:?}", gpu_state.get_alu_active());
+        }
+    }
+
+    #[test]
     fn mem_dummy() {
         let res = parse(
             r"
@@ -4015,7 +4205,7 @@ ret",
                 gpu_state.cus[0].l1.gather_queue.len()
             );
             // println!("{:?}", gpu_state.cus[0].l1.gather_queue);
-            println!("{:?},",line);
+            println!("{:?},", line);
             history.push(line);
         }
         // println!();
@@ -4036,9 +4226,9 @@ ret",
                 "6:<3|3|4>",
                 "6:<3|4|4>",
                 "6:<2|4|1>",
-                "6:<2|1|1>",
-                "6:<2|0|1>",
-                "6:<2|1|1>",
+                "6:<1|1|1>",
+                "6:<1|0|1>",
+                "6:<1|1|1>",
                 "6:<1|1|1>",
                 "6:<0|1|0>",
                 "7:<0|0|0>",

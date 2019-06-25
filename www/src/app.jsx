@@ -13,6 +13,8 @@ import branch_1_s from './asm/branch_1.s';
 import branch_2_s from './asm/branch_2.s';
 import branch_3_s from './asm/branch_3.s';
 import branch_4_s from './asm/branch_4.s';
+import branch_5_s from './asm/branch_5.s';
+import branch_6_s from './asm/branch_6.s';
 import readme_md from './Readme.md';
 
 function onChange(newValue) {
@@ -110,6 +112,12 @@ class TextEditorComponent extends React.Component {
                     </button>
                     <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_4}>
                         branch_4
+                    </button>
+                    <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_5}>
+                        branch_5
+                    </button>
+                    <button style={{ border: 1 }} onClick={this.props.globals().setupBranch_6}>
+                        branch_6
                     </button>
                 </div>
                 <AceEditor
@@ -234,7 +242,8 @@ class BindingsComponent extends React.Component {
         }
         let t0 = this.refs.t0;
         let t1 = this.refs.t1;
-        Promise.all([promiseOnload(t0), promiseOnload(t1)]).then((value) => {
+        let t4 = this.refs.t4;
+        Promise.all([promiseOnload(t0), promiseOnload(t1), promiseOnload(t4)]).then((value) => {
             // console.log("images loaded");
             let pushImg = (img) => {
                 this.refs.canvas.width = img.width;
@@ -252,6 +261,31 @@ class BindingsComponent extends React.Component {
             }
             pushImg(t0);
             pushImg(t1);
+            let pushCheckerboard = (size) => {
+                this.refs.canvas.width = 256;
+                this.refs.canvas.height = 256;
+                for (var y = 0; y < 256; y++) {
+                    for (var x = 0; x < 256; x++) {
+                        this.ctx.fillStyle = "#ffffff";
+                        if (
+                            Math.floor(x / size) % 2 == 0 ^
+                            Math.floor(y / size) % 2 == 0
+                            ) {
+                                this.ctx.fillStyle = "#000000";
+                               
+                        }
+                        this.ctx.fillRect(x, y, 1, 1);
+                    }
+                }
+                let base64 = this.refs.canvas.toDataURL('image/png');
+                this.props.globals().r_images.push(base64);
+                let image = new Image();
+                image.src = base64;
+                return image;
+            };
+            this.checkerboard1 = pushCheckerboard(1);
+            this.checkerboard64 = pushCheckerboard(64);
+            pushImg(t4);
             this.props.globals().resetGPU();
             this.updateMemory();
             // console.log(base64);
@@ -268,9 +302,12 @@ class BindingsComponent extends React.Component {
 
         let t0 = this.refs.t0;
         let t1 = this.refs.t1;
+        let t2 = this.checkerboard1;
+        let t3 = this.checkerboard64;
+        let t4 = this.refs.t4;
         image.onload = function () {
             canvas.width = 512;
-            canvas.height = 1024;
+            canvas.height = 1024 + 512;
             // canvas.width = image.width;
             // canvas.height += image.height;
             ctx.fillStyle = "#222222";
@@ -300,6 +337,22 @@ class BindingsComponent extends React.Component {
             ctx.drawImage(t1, x, y);
             y += t1.height + 10;
             x = 0;
+
+            drawText("t2 = ");
+            ctx.drawImage(t2, x, y);
+            y += t2.height + 10;
+            x = 0;
+
+            drawText("t3 = ");
+            ctx.drawImage(t3, x, y);
+            y += t3.height + 10;
+            x = 0;
+
+            drawText("t4 = ");
+            ctx.drawImage(t4, x, y);
+            y += t4.height + 10;
+            x = 0;
+
             drawText("u0 = ");
             ctx.drawImage(image, x, y);
         };
@@ -315,6 +368,7 @@ class BindingsComponent extends React.Component {
                 <canvas ref="canvas" />
                 <img style={{ display: "none" }} ref="t0" src="img/lenna.png"></img>
                 <img style={{ display: "none" }} ref="t1" src="img/rhino.png"></img>
+                <img style={{ display: "none" }} ref="t4" src="img/noise.png"></img>
             </div>
         );
     }
@@ -615,6 +669,8 @@ class GoldenLayoutWrapper extends React.Component {
         this.setupBranch_2 = this.setupBranch_2.bind(this);
         this.setupBranch_3 = this.setupBranch_3.bind(this);
         this.setupBranch_4 = this.setupBranch_4.bind(this);
+        this.setupBranch_5 = this.setupBranch_5.bind(this);
+        this.setupBranch_6 = this.setupBranch_6.bind(this);
     }
     setupRaymarching() {
         this.globals.dispatchConfig = {
@@ -629,6 +685,38 @@ class GoldenLayoutWrapper extends React.Component {
             "ALU_pipe_len": 1
         };
         this.globals.setText(raymarcher_s);
+        this.globals.resetGPU();
+    }
+
+    setupBranch_5() {
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 2048, "cycles_per_iter": 1, "update graph": true
+        };
+        this.globals.gpuConfig = {
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 4, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
+            "ALU_pipe_len": 1
+        };
+        this.globals.setText(branch_5_s);
+        this.globals.resetGPU();
+    }
+
+    setupBranch_6() {
+        this.globals.dispatchConfig = {
+            "group_size": 32, "groups_count": 2048, "cycles_per_iter": 1, "update graph": false
+        };
+        this.globals.gpuConfig = {
+            "DRAM_latency": 32,
+            "DRAM_bandwidth": 12 * 64, "L1_size": 1024, "L1_latency": 4,
+            "L2_size": 1 * 1024, "L2_latency": 16, "sampler_cache_size": 1 * 1024,
+            "sampler_latency": 16, "VGPRF_per_pe": 128, "wave_size": 32,
+            "CU_count": 64, "ALU_per_cu": 2, "waves_per_cu": 4, "fd_per_cu": 2,
+            "ALU_pipe_len": 1
+        };
+        this.globals.setText(branch_6_s);
         this.globals.resetGPU();
     }
 
@@ -736,6 +824,8 @@ class GoldenLayoutWrapper extends React.Component {
         this.globals.setupBranch_2 = this.setupBranch_2;
         this.globals.setupBranch_3 = this.setupBranch_3;
         this.globals.setupBranch_4 = this.setupBranch_4;
+        this.globals.setupBranch_5 = this.setupBranch_5;
+        this.globals.setupBranch_6 = this.setupBranch_6;
         this.globals.setupRaymarching = this.setupRaymarching;
         this.globals.r_images = [];
         this.globals.active_mask_history = null;
